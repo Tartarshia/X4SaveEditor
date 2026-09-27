@@ -1,0 +1,62 @@
+// Optional browser development check. Requires a separately installed Playwright.
+const {chromium} = require(process.env.X4_PLAYWRIGHT_MODULE || 'playwright');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
+(async()=>{
+  const browser=await chromium.launch({channel:'msedge',headless:true});
+  const page=await browser.newPage({viewport:{width:1440,height:900}});
+  const errors=[]; page.on('pageerror',e=>errors.push(e.message));
+  const base=process.env.X4_WEB_URL || 'http://127.0.0.1:8765';
+  const wait=async()=>{await page.waitForFunction(()=>!document.body.classList.contains('working'));};
+  try {
+    await page.goto(base);
+    await page.waitForFunction(()=>typeof token==='string' && token.length>10);
+    await wait();
+    assert.equal(await page.locator('#busyIndicator').isVisible(),false);
+    const xml='<savegame><info><player name="测试 &lt;img&gt;" money="42"/></info>'+Array.from({length:450},(_,i)=>`<component id="${i}" owner="player"/>`).join('')+'</savegame>';
+    await page.locator('#open').click();
+    await page.locator('#openDialog').waitFor({state:'visible'});
+    await page.locator('#file').setInputFiles({name:'browser-test.xml',mimeType:'text/xml',buffer:Buffer.from(xml)});
+    await page.locator('#filename').filter({hasText:'browser-test.xml'}).waitFor();
+    await page.locator('#nodes tbody tr').first().waitFor(); await wait();
+    await page.locator('#searchText').fill('component');await page.locator('#search').click();
+    await page.waitForFunction(()=>document.querySelectorAll('#nodes tbody tr').length===200);await wait();
+    const first=await page.locator('#nodes tbody tr').first().getAttribute('data-node');
+    await page.locator('#next').click();await page.waitForFunction(first=>document.querySelector('#nodes tbody tr')?.dataset.node!==first,first);await wait();
+    await page.locator('#back').click();await page.waitForFunction(first=>document.querySelector('#nodes tbody tr')?.dataset.node===first,first);await wait();
+    const splitter=await page.locator('#splitter').boundingBox();
+    const widthBefore=(await page.locator('#browser').boundingBox()).width;
+    await page.mouse.move(splitter.x+5,splitter.y+80);await page.mouse.down();await page.mouse.move(splitter.x-130,splitter.y+80);await page.mouse.up();
+    const widthAfter=(await page.locator('#browser').boundingBox()).width;
+    assert(widthAfter<widthBefore-80);
+    await page.locator('#searchText').fill('player');await page.locator('#search').click();
+    await page.waitForFunction(()=>document.querySelectorAll('#nodes tbody tr').length===1);await wait();
+    await page.locator('#nodes tbody tr').first().click();
+    await page.getByRole('textbox',{name:'money',exact:true}).waitFor();await wait();
+    await page.getByRole('textbox',{name:'money',exact:true}).fill('12345');
+    await page.locator('.attr').filter({has:page.locator('label',{hasText:'money'})}).getByRole('button',{name:'暂存'}).click();
+    assert.equal(await page.locator('#changeCount').textContent(),'1');
+    await page.locator('#review').click();assert.equal(await page.locator('#reviewTable tbody tr').count(),1);
+    await page.locator('#reviewDialog [data-close]').click();
+    await page.locator('#export').click();await page.locator('#exportName').fill('web-roundtrip.xml');await page.locator('#confirmExport').click();
+    await page.locator('#resultDialog').waitFor({state:'visible'});await wait();
+    const downloadURL=await page.locator('#download').getAttribute('href');
+    const downloaded=await (await page.request.get(base+downloadURL)).text();
+    assert.equal(downloaded,xml.replace('money="42"','money="12345"'));
+    await page.locator('#resultDialog [data-close]').click();
+    await page.locator('#review').click();await page.locator('#reviewTable button').click();await page.locator('#reviewDialog [data-close]').click();
+    assert.equal(await page.locator('#changeCount').textContent(),'0');
+    assert.equal(await page.locator('#busyIndicator').isVisible(),false);
+    await page.setViewportSize({width:700,height:850});
+    const left=await page.locator('#browser').boundingBox(),right=await page.locator('#detail').boundingBox();
+    assert(right.y>left.y+left.height);
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth));
+    await page.setViewportSize({width:1440,height:900});
+    fs.mkdirSync(path.join(__dirname,'../.local'),{recursive:true});
+    await page.screenshot({path:path.join(__dirname,'../.local/web-smoke.png')});
+    assert.deepEqual(errors,[]);
+    console.log('PASS: browser upload, paging, back, split resize, edit, undo, export/download, narrow layout, idle progress hidden');
+  } finally {await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});

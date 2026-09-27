@@ -1,9 +1,16 @@
 # X4SaveEditor
 
-Python standard library only. Run `python -m unittest discover -s tests -v`.
-Keep large-save processing streamed, disk indexed, paginated and out of the UI process.
+Independent workspace. Do not change sibling projects or the game installation.
+Python standard library only. Run `python -m unittest discover -s tests`.
+Large saves must use streaming parsing, bounded memory, disk indexes, paginated UI,
+and background processes for long operations. Never build an entire XML DOM.
 Preserve original XML bytes except explicitly edited attribute values.
-Export only to a new file and validate before publishing it. Never overwrite source saves.
-Keep caches, saves, local reports, screenshots, credentials and machine paths out of Git and releases.
-Retain LICENSE and THIRD_PARTY_NOTICES.md; record exact origins when adding third-party material.
-ID translation is a separate future layer; do not guess game semantics.
+Export to a new file only; validate before publishing it. Never overwrite a source save.
+Keep saves, cache, local benchmarks, user names and machine paths out of version control.
+ID translation is a later layer; retain raw IDs and never guess game semantics.
+
+The default UI is web_server.py with static web/ assets. Bind loopback only;
+keep same-origin/Host/token checks and stream uploads/downloads. No CDN assets.
+Long jobs run in tasks.py in a separate process; never parse entire saves in the browser.
+Keep LICENSE, THIRD_PARTY_NOTICES.md and pinned research references in source releases.
+Local data, screenshots, caches and exports must remain ignored. No auto-start service.
