@@ -86,8 +86,10 @@ class State:
                     args = (self.folder, body.get('mode', 'children'), body.get('value', 0), int(body.get('after', 0)))
                 elif action == 'details':
                     args = (self.folder, int(body['node']))
-                elif action == 'tags':
+                elif action in ('tags','shortcuts'):
                     args = (self.folder,)
+                elif action in ('gameplay','plan'):
+                    args = (self.folder, body)
                 elif action == 'export':
                     changes = body.get('changes', {})
                     if not isinstance(changes, dict) or any(not isinstance(v, dict) or any(not isinstance(x, str) for x in v.values()) for v in changes.values()):
@@ -97,7 +99,7 @@ class State:
                         raise ValueError('导出名称必须为 .xml 或 .xml.gz 文件名')
                     dest = ROOT / '.local' / 'exports' / uuid.uuid4().hex / name
                     dest.parent.mkdir(parents=True)
-                    args = (self.folder, changes, str(dest))
+                    args = (self.folder, changes, str(dest), body.get('commands', []), body.get('gamePath'))
                 else:
                     raise ValueError('未知任务')
             job = dict(id=uuid.uuid4().hex, action=action, status='running', message='任务已开始', started=time.monotonic())
@@ -182,9 +184,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             with path.open('rb') as f:
                 shutil.copyfileobj(f, self.wfile, 1024*1024)
-        elif parsed.path in ('/', '/app.js', '/style.css'):
-            name = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}[parsed.path]
-            mime = {'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'style.css': 'text/css; charset=utf-8'}[name]
+        elif parsed.path in ('/', '/app.js', '/features.js', '/style.css'):
+            name = {'/': 'index.html', '/app.js': 'app.js', '/features.js': 'features.js', '/style.css': 'style.css'}[parsed.path]
+            mime = {'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'features.js': 'text/javascript; charset=utf-8', 'style.css': 'text/css; charset=utf-8'}[name]
             self.send_bytes((ROOT / 'web' / name).read_bytes(), mime)
         else:
             self.json({'error': 'Not found'}, 404)

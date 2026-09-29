@@ -1,0 +1,54 @@
+// Optional browser check: prepare .local/gameplay-smoke via test_gameplay.make_game.
+const {chromium}=require(process.env.X4_PLAYWRIGHT_MODULE||'playwright');
+const assert=require('node:assert/strict');
+const path=require('node:path');
+(async()=>{
+  const browser=await chromium.launch({channel:'msedge',headless:true});
+  const page=await browser.newPage({viewport:{width:1440,height:1000}});
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const base=process.env.X4_WEB_URL||'http://127.0.0.1:8765';
+  const wait=async()=>{await page.waitForFunction(()=>!busy);};
+  const tab=async name=>{await page.locator(`[data-tab=${name}]`).click();await wait();};
+  try{
+    await page.goto(base);await page.waitForFunction(()=>token.length>10);await wait();
+    page.on('dialog',d=>d.accept());
+    await page.locator('#open').click();await page.locator('#file').setInputFiles(path.resolve(__dirname,'../.local/gameplay-smoke/save.xml'));
+    await page.locator('#moneyAmount').waitFor();await wait();
+    await page.locator('#gameSettings').click();await page.locator('#gamePath').fill(path.resolve(__dirname,'../.local/gameplay-smoke/game'));await page.locator('#loadGameData').click();await wait();
+    await page.locator('#moneyAmount').fill('123456');await page.getByRole('button',{name:'暂存金钱',exact:true}).click();await wait();
+    assert.equal(await page.locator('#changeCount').textContent(),'1');
+    assert.equal(await page.locator('.station-money tbody tr').count(),2);
+    await page.getByRole('spinbutton',{name:'Factory A 目标余额'}).fill('900');
+    await page.locator('.station-money tbody tr').filter({hasText:'Factory A'}).getByRole('button',{name:'暂存'}).click();await wait();
+    await page.getByRole('spinbutton',{name:'Factory B 目标余额'}).fill('50');
+    await page.locator('.station-money tbody tr').filter({hasText:'Factory B'}).getByRole('button',{name:'暂存'}).click();await wait();
+    assert.equal(await page.locator('#changeCount').textContent(),'3');
+    await tab('relations');
+    assert(!(await page.locator('#featureBody tbody').textContent()).includes('visitor'));
+    await page.locator('#includeInternalFactions').check();await wait();
+    assert((await page.locator('#featureBody tbody').textContent()).includes('visitor123'));
+    await page.locator('#includeInternalFactions').uncheck();await wait();
+    assert(!(await page.locator('#featureBody tbody').textContent()).includes('visitor'));
+    const rel=page.locator('#featureBody tr').filter({hasText:'测试联邦'});await rel.locator('select').selectOption('0.1');await rel.getByRole('button',{name:'暂存',exact:true}).click();await wait();
+    await tab('blueprints');assert((await page.locator('#featureBody').textContent()).includes('测试引擎'));await page.locator('#selectFeaturePage').check();await page.getByRole('button',{name:'解锁所选蓝图'}).click();await wait();assert((await page.locator('#featureBody').textContent()).includes('待解锁'));
+    await tab('crew');await page.locator('#selectFeaturePage').check();await page.getByRole('button',{name:'应用到所选船员'}).click();await wait();
+    assert.equal(await page.locator('#changeCount').textContent(),'9');
+    await tab('cargo');
+    const unnamed=page.locator('#featureShip option').filter({hasText:'SYN-001'});
+    assert.equal(await unnamed.textContent(),'测试运输舰 SYN-001');
+    assert((await page.locator('#featureShip').textContent()).includes('Test ship'));
+    const ore=page.getByRole('spinbutton',{name:'ore 数量'});await ore.fill('0');await ore.locator('xpath=ancestor::tr').getByRole('button',{name:'暂存',exact:true}).click();await wait();
+    await page.getByRole('combobox',{name:'选择货物',exact:true}).selectOption('ice');await page.getByRole('spinbutton',{name:'货物目标数量'}).fill('21');await page.getByRole('button',{name:'暂存货物',exact:true}).click();await page.locator('#errorDialog').waitFor();assert((await page.locator('#errorMessage').textContent()).includes('超出货仓容量'));await page.locator('#errorDialog [data-close]').last().click();
+    assert.equal(await page.locator('#changeCount').textContent(),'10');
+    await page.getByRole('spinbutton',{name:'货物目标数量'}).fill('20');await page.getByRole('button',{name:'暂存货物',exact:true}).click();await wait();
+    await page.locator('#review').click();assert.equal(await page.locator('#reviewTable tbody tr').count(),11);await page.locator('#reviewDialog [data-close]').click();
+    await page.locator('#export').click();await page.locator('#exportName').fill('gameplay-browser.xml');await page.locator('#confirmExport').click();await page.locator('#resultDialog').waitFor();
+    const url=await page.locator('#download').getAttribute('href');const xml=await(await page.request.get(base+url)).text();
+    assert(xml.includes('money="123456"'));assert(xml.includes('id="station-A" amount="900"'));assert(xml.includes('id="station-B" own="1" amount="50"'));assert(xml.includes('<blueprint ware="new_engine"/>'));assert(xml.includes('ware="ice" amount="20"'));assert(xml.includes('piloting="15"'));
+    await page.locator('#resultDialog [data-close]').click();
+    await page.setViewportSize({width:700,height:850});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    await page.screenshot({path:path.resolve(__dirname,'../.local/gameplay-mobile.png')});
+    await page.setViewportSize({width:1440,height:1000});await tab('crew');await page.screenshot({path:path.resolve(__dirname,'../.local/gameplay-crew.png')});
+    assert.deepEqual(errors,[]);console.log('PASS: money, relations, missing blueprints, bulk crew, cargo insert/remove, capacity rejection, preview, export, narrow layout');
+  }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});

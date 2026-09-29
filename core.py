@@ -174,23 +174,28 @@ def start_tag(folder, node):
     if row is None:
         raise ValueError('节点不存在')
     offset = row[0]
+    with open(Path(folder) / 'source.xml', 'rb') as f:
+        return offset, read_start_tag(f, offset)
+
+
+def read_start_tag(f, offset):
+    """Read a bounded start tag using an already open snapshot handle."""
     data = bytearray()
     quote = None
-    with open(Path(folder) / 'source.xml', 'rb') as f:
-        f.seek(offset)
-        while len(data) < 16 * CHUNK:
-            chunk = f.read(4096)
-            if not chunk:
-                break
-            for b in chunk:
-                data.append(b)
-                if quote:
-                    if b == quote:
-                        quote = None
-                elif b in (34, 39):
-                    quote = b
-                elif b == 62:
-                    return offset, bytes(data)
+    f.seek(offset)
+    while len(data) < 16 * CHUNK:
+        chunk = f.read(4096)
+        if not chunk:
+            break
+        for b in chunk:
+            data.append(b)
+            if quote:
+                if b == quote:
+                    quote = None
+            elif b in (34, 39):
+                quote = b
+            elif b == 62:
+                return bytes(data)
     raise ValueError('起始标签过大或损坏（超过 16 MiB）')
 
 
@@ -229,7 +234,7 @@ def replaced_tag(raw, edits):
     return result
 
 
-def validate(path, expected=None, progress=lambda msg: None):
+def validate(path, expected=None, progress=lambda msg: None, expected_sha=None):
     p = parser()
     count = 0
     checked = set()
@@ -244,8 +249,10 @@ def validate(path, expected=None, progress=lambda msg: None):
             checked.add(count)
     p.StartElementHandler = start
     last = time.perf_counter()
+    digest = hashlib.sha256()
     with input_stream(path) as f:
         while chunk := f.read(CHUNK):
+            digest.update(chunk)
             p.Parse(chunk, False)
             if time.perf_counter() - last > .5:
                 progress(f'回读校验：{count:,} 个节点')
@@ -253,10 +260,12 @@ def validate(path, expected=None, progress=lambda msg: None):
         p.Parse(b'', True)
     if checked != set(expected):
         raise ValueError('部分待修改节点未找到')
+    if expected_sha and digest.hexdigest() != expected_sha:
+        raise ValueError('导出内容回读校验失败')
     return count
 
 
-def export_save(folder, changes, destination, progress=lambda msg: None):
+def export_save(folder, changes, destination, progress=lambda msg: None, structural=None, node_delta=0):
     """Never overwrites. Publish only after XML and edit read-back validation."""
     folder, dest = Path(folder), Path(destination).resolve()
     if dest.exists():
@@ -264,7 +273,7 @@ def export_save(folder, changes, destination, progress=lambda msg: None):
     if not str(dest).lower().endswith(('.xml', '.xml.gz')):
         raise ValueError('目标必须为 .xml 或 .xml.gz')
     meta = json.loads((folder / 'meta.json').read_text('utf-8'))
-    patches = []
+    patches = list(structural or [])
     for node, edits in changes.items():
         offset, raw = start_tag(folder, int(node))
         patches.append((offset, raw, replaced_tag(raw, edits)))
@@ -273,6 +282,7 @@ def export_save(folder, changes, destination, progress=lambda msg: None):
     os.close(fd)
     try:
         digest = hashlib.sha256()
+        output_digest = hashlib.sha256()
         done = 0
         last = time.perf_counter()
         with open(folder / 'source.xml', 'rb') as src, open(temporary, 'wb') as base:
@@ -285,6 +295,7 @@ def export_save(folder, changes, destination, progress=lambda msg: None):
                         raise ValueError('缓存被截断')
                     digest.update(buf)
                     out.write(buf)
+                    output_digest.update(buf)
                     done += len(buf)
                     n -= len(buf)
                     if time.perf_counter() - last > .5:
@@ -300,6 +311,7 @@ def export_save(folder, changes, destination, progress=lambda msg: None):
                 digest.update(old)
                 done += len(old)
                 out.write(replacement)
+                output_digest.update(replacement)
             copy(meta['xml_bytes'] - src.tell())
             if src.read(1) or digest.hexdigest() != meta['xml_sha256']:
                 raise ValueError('缓存校验失败，请重新建立索引')
@@ -308,7 +320,7 @@ def export_save(folder, changes, destination, progress=lambda msg: None):
             base.flush()
             os.fsync(base.fileno())
         progress('导出完成，正在完整回读校验…')
-        if validate(temporary, changes, progress) != meta['nodes']:
+        if validate(temporary, {} if structural else changes, progress, output_digest.hexdigest()) != meta['nodes'] + node_delta:
             raise ValueError('导出前后节点数不一致')
         # Hard link provides atomic, no-clobber publication on NTFS.
         os.link(temporary, dest)

@@ -59,6 +59,9 @@ class WebTests(unittest.TestCase):
         original = source.read_bytes()
         opened = self.job('open', path=str(source))
         revision = opened['revision']
+        catalog = self.job('shortcuts', revision=revision)
+        self.assertEqual(len(catalog), 15)
+        self.assertEqual(self.job('query', revision=revision, mode='shortcut', value='inventory'), [])
         rows = self.job('query', revision=revision, mode='tag', value='item')
         self.assertEqual(len(rows), 201)
         next_rows = self.job('query', revision=revision, mode='tag', value='item', after=rows[199][0])
