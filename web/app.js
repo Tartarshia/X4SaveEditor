@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 let token = '', revision = null, snapshot = null, busy = false;
 let locationState = {mode:'children', value:0, after:0}, history = [], rows = [], selected = null;
-let attributes = {}, changes = new Map(), hasMore = false;
+let attributes = {}, changes = new Map(), advancedDrafts = new Map(), hasMore = false;
 let shortcutCatalog = [];
 const fmt = n => Number(n).toLocaleString('zh-CN');
 const cell = (row, value) => { const td=document.createElement('td'); td.textContent=String(value); td.title=String(value); row.append(td); return td; };
@@ -47,10 +47,10 @@ function applySnapshot(data) {
   $('summary').textContent=`XML ${(m.xml_bytes/1048576).toFixed(1)} MiB · ${fmt(m.nodes)} 节点 · ${m.tags} 种标签 · 首次索引 ${m.seconds.toFixed(1)} 秒`;
 }
 async function openSave(path) {
-  if ((changes.size || commands.size) && !confirm('打开其他存档会丢弃待修改清单，继续？')) return;
+  if ((changes.size || commands.size || drafts.size || advancedDrafts.size) && !confirm('打开其他存档会丢弃待修改清单和未暂存输入，继续？')) return;
   $('openDialog').close();
   const data=await job('open',{path});
-  changes.clear(); commands.clear(); selectedShip=''; selectedSector=''; shipSearch=''; includeInternalFactions=false; featurePage=0; stationPage=0; stationSearch=''; stationSector=''; updateCount(); history=[];
+  changes.clear(); commands.clear(); drafts.clear(); advancedDrafts.clear(); updateDraftCount(); selectedShip=''; selectedSector=''; shipSearch=''; includeInternalFactions=false; featurePage=0; stationPage=0; stationSearch=''; stationSector=''; updateCount(); history=[];
   gameHome=null;
   $('featureBody').textContent='正在识别玩家账户、舰船和船员…';
   shortcutCatalog=[];
@@ -118,19 +118,16 @@ function renderAttributes() {
   if (!selected) return;
   const node=selected[0];
   for (const [key, original] of Object.entries(attributes)) {
-    const id=node+':'+key, edit=changes.get(id);
-    const row=document.createElement('div'); row.className='attr'+(edit?' changed':'');
+    const id=node+':'+key, edit=changes.get(id), draft=advancedDrafts.get(id);
+    const row=document.createElement('div'); row.className='attr'+(edit||draft?' changed':'');
     const label=document.createElement('label'); label.textContent=key;
-    const input=document.createElement('input'); input.value=edit?edit.value:original; input.setAttribute('aria-label',key); input.dataset.work='';
-    const button=document.createElement('button'); button.textContent='暂存'; button.dataset.work='';
-    button.onclick=()=>{
-      if (input.value===original) changes.delete(id);
-      else changes.set(id,{node,key,original,value:input.value});
-      updateCount(); row.classList.toggle('changed',changes.has(id));
-      $('status').textContent=changes.has(id)?`${key} 已加入待修改清单`:`${key} 已恢复原值`;
+    const input=document.createElement('input'); input.value=draft?.value??edit?.value??original; input.setAttribute('aria-label',key); input.dataset.work='';
+    input.oninput=()=>{
+      if(input.value===(edit?.value??original))advancedDrafts.delete(id);
+      else advancedDrafts.set(id,{node,key,original,value:input.value});
+      row.classList.toggle('changed',advancedDrafts.has(id)||changes.has(id));updateDraftCount();
     };
-    input.onkeydown=e=>{if(e.key==='Enter') button.click();};
-    row.append(label,input,button); container.append(row);
+    row.append(label,input); container.append(row);
   }
   if (!Object.keys(attributes).length) { const p=document.createElement('p'); p.className='muted'; p.textContent='此节点没有属性，可进入子节点继续浏览。'; container.append(p); }
 }
@@ -195,14 +192,14 @@ $('tags').onclick=work(async()=>{
   $('tagsDialog').showModal();
 });
 $('tagFilter').oninput=()=>{const q=$('tagFilter').value.toLowerCase();for(const tr of $('tagTable').querySelector('tbody').rows)tr.hidden=!tr.cells[0].textContent.toLowerCase().includes(q);};
-$('export').onclick=()=>{if(!revision)return;$('exportSummary').textContent=`本次将导出 ${changes.size} 项属性修改和 ${commands.size} 项功能修改，保留原存档。`;$('exportName').value=$('filename').textContent.replace(/\.xml/i,'_edited.xml');$('exportDialog').showModal();};
+$('export').onclick=work(async()=>{if(!revision)return;if(drafts.size||advancedDrafts.size)await stagePending();$('exportSummary').textContent=`本次将导出 ${changes.size} 项属性修改和 ${commands.size} 项功能修改，保留原存档。`;$('exportName').value=$('filename').textContent.replace(/\.xml/i,'_edited.xml');$('exportDialog').showModal();});
 $('confirmExport').onclick=work(async()=>{
   const values=Object.create(null);for(const edit of changes.values()){if(!values[edit.node])values[edit.node]=Object.create(null);values[edit.node][edit.key]=edit.value;}
   const name=$('exportName').value.trim();$('exportDialog').close();
   const result=await job('export',{changes:values,name,commands:[...commands.values()],gamePath:gamePathValue});$('exportPath').textContent=result.path;$('download').href=result.url;$('resultDialog').showModal();
 });
 document.querySelectorAll('[data-close]').forEach(button=>button.onclick=()=>button.closest('dialog').close());
-window.addEventListener('beforeunload',e=>{if(changes.size||commands.size||busy){e.preventDefault();e.returnValue='';}});
+window.addEventListener('beforeunload',e=>{if(changes.size||commands.size||drafts.size||advancedDrafts.size||busy){e.preventDefault();e.returnValue='';}});
 const splitter=$('splitter');let dragging=false;
 function resize(percent){const value=Math.max(25,Math.min(75,percent));document.documentElement.style.setProperty('--left',value+'%');splitter.setAttribute('aria-valuenow',Math.round(value));try{localStorage.setItem('x4-split',value);}catch{}}
 splitter.onpointerdown=e=>{dragging=true;splitter.setPointerCapture(e.pointerId);e.preventDefault();};

@@ -21,8 +21,8 @@ SAVE = '''<savegame><info><game version="900"/><player money="42"/></info>
 <connection><component class="computer" owner="player"><traits><skills piloting="3"/></traits></component></connection>
 <connection><component class="ship_s" owner="enemy"><connections><connection><component class="storage" macro="test_storage"><cargo><ware ware="ore" amount="99"/></cargo></component></connection></connections></component></connection>
 </connections></component><component class="ship_s" id="empty" owner="player" macro="test_ship" code="SYN-001"><connections><connection><component class="storage" macro="test_storage"/></connection></connections></component>
-<component class="station" owner="player" name="Factory A" code="ST-A"><account id="station-A" amount="75" min="20" max="100" own="1"/></component>
-<component class="station" owner="player" name="Factory B" code="ST-B"><account id="station-B" own="1"/></component>
+<component class="zone" id="zone-A"><component class="station" owner="player" name="Factory A" code="ST-A"><account id="station-A" amount="75" min="20" max="100" own="1"/></component><component class="buildstorage" owner="player"><account id="build-A" amount="30" min="10" max="40" own="1"/></component></component>
+<component class="zone" id="zone-B"><component class="station" owner="player" name="Factory B" code="ST-B"><account id="station-B" own="1"/></component><component class="buildstorage" owner="player"><account id="build-B" own="1"/></component></component>
 <component class="station" owner="enemy" name="Enemy Factory"><account id="enemy-cash" amount="600"/></component>
 </universe><stats><stat id="money_player" value="42"/></stats><unchanged quoted='yes'><!-- keep bytes --></unchanged></savegame>'''
 
@@ -101,6 +101,8 @@ class GameplayTests(unittest.TestCase):
             {'kind':'money','value':'123456'},
             {'kind':'station_money','id':station_a,'value':'900'},
             {'kind':'station_money','id':station_b,'value':'50'},
+            {'kind':'construction_money','id':station_a,'value':'700'},
+            {'kind':'construction_money','id':station_b,'value':'60'},
             {'kind':'relation','id':'argon','value':'0.1'},
             {'kind':'relation','id':'teladi','value':'0'},
             {'kind':'blueprint','id':'new_engine'},
@@ -113,6 +115,10 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(tree.find('.//account[@id="station-A"]').get('min'),'20')
         self.assertEqual(tree.find('.//account[@id="station-A"]').get('max'),'100')
         self.assertEqual(tree.find('.//account[@id="station-B"]').get('amount'),'50')
+        self.assertEqual(tree.find('.//account[@id="build-A"]').get('amount'),'700')
+        self.assertEqual(tree.find('.//account[@id="build-A"]').get('min'),'10')
+        self.assertEqual(tree.find('.//account[@id="build-A"]').get('max'),'40')
+        self.assertEqual(tree.find('.//account[@id="build-B"]').get('amount'),'60')
         self.assertEqual(tree.find('.//account[@id="enemy-cash"]').get('amount'),'600')
         self.assertEqual(tree.find('info/player').get('money'),'123456')
         self.assertEqual(tree.find('stats/stat').get('value'),'123456')
@@ -148,6 +154,8 @@ class GameplayTests(unittest.TestCase):
                [{'kind':'money','value':-1}],[{'kind':'money','value':1.5}],
                [{'kind':'station_money','id':999999999,'value':100}],
                [{'kind':'station_money','id':next(iter(e.station_accounts)),'value':-1}],
+               [{'kind':'construction_money','id':999999999,'value':100}],
+               [{'kind':'construction_money','id':next(iter(e.station_accounts)),'value':-1}],
                [{'kind':'crew','id':next(iter(e.crew)),'value':16}]]
         for commands in bad:
             with self.subTest(commands=commands),self.assertRaises(ValueError):e.plan(commands).compile()
@@ -160,10 +168,41 @@ class GameplayTests(unittest.TestCase):
         rows={r['name']:r for r in data['rows']}
         self.assertEqual(rows['Factory A']['amount'],75)
         self.assertEqual(rows['Factory B']['amount'],0)
-        self.assertTrue(all(r['editable'] for r in rows.values()))
+        self.assertTrue(all(r['editable'] and r['construction']['editable'] for r in rows.values()))
+        self.assertEqual(rows['Factory A']['construction']['amount'],30)
+        self.assertEqual(rows['Factory B']['construction']['amount'],0)
+        self.assertEqual((rows['Factory A']['min'],rows['Factory A']['max']),(20,100))
+        self.assertEqual((rows['Factory A']['construction']['min'],rows['Factory A']['construction']['max']),(10,40))
+        self.assertIsNone(rows['Factory B']['construction']['min'])
         self.assertEqual(e.view({'kind':'station_money','search':'ST-B'})['total'],1)
         self.assertEqual(e.view({'kind':'station_money','search':'Enemy'})['total'],0)
         self.assertEqual(e.view({'kind':'home'})['stationCount'],2)
+
+    def test_buildstorage_must_be_uniquely_associated(self):
+        source=self.root/'ambiguous.xml'
+        source.write_text(SAVE.replace('<component class="buildstorage" owner="player"><account id="build-A" amount="30" min="10" max="40" own="1"/></component>',
+                                      '<component class="buildstorage" owner="player"><account id="build-A" amount="30" own="1"/></component><component class="buildstorage" owner="player"><account id="build-extra" own="1"/></component>'),'utf-8')
+        folder,_=core.build_index(source,self.root/'cache')
+        editor=Editor(folder,self.root/'game')
+        try:
+            row=next(r for r in editor.view({'kind':'station_money'})['rows'] if r['name']=='Factory A')
+            self.assertFalse(row['construction']['editable'])
+            with self.assertRaises(ValueError):editor.plan([{'kind':'construction_money','id':row['id'],'value':100}])
+            self.assertTrue(row['editable'])
+        finally:
+            editor.close()
+
+    def test_buildstorage_requires_a_zone(self):
+        source=self.root/'no-zone.xml'
+        source.write_text(SAVE.replace('class="zone" id="zone-A"','class="collection" id="zone-A"'),'utf-8')
+        folder,_=core.build_index(source,self.root/'cache')
+        editor=Editor(folder,self.root/'game')
+        try:
+            rows={r['name']:r for r in editor.view({'kind':'station_money'})['rows']}
+            self.assertFalse(rows['Factory A']['construction']['editable'])
+            self.assertTrue(rows['Factory B']['construction']['editable'])
+        finally:
+            editor.close()
 
     def test_shared_station_account_is_not_independent(self):
         source=self.root/'shared.xml';source.write_text(SAVE.replace('id="station-B"','id="station-A"'),'utf-8')

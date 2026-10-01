@@ -58,17 +58,34 @@ class Editor:
         self.owned = {self.attrs(n).get('ware') for n in self.children(self.first(self.player,'blueprints'),'blueprint')}
         self.station_accounts = {}
         money_accounts = {self.attrs(n).get('id') for n in self.members.get('money',[]) if self.names[self.node(n)[1]] == 'account'}
-        for station in self.members.get('stations', []):
-            accounts = self.children(station,'account')
+        def account_info(component):
+            accounts = self.children(component,'account')
             if len(accounts) != 1:
-                self.station_accounts[station] = {'node':None,'amount':None,'editable':False,'reason':'账户数量不唯一'}
-                continue
+                return {'node':None,'amount':None,'min':None,'max':None,'editable':False,'reason':'账户数量不唯一'}
             account = accounts[0]
             attrs = self.attrs(account)
             ref = attrs.get('id')
             matches = self.db.execute('SELECT l.node FROM labels l JOIN nodes n ON n.id=l.node WHERE l.ref=? AND n.tag=?',(ref,self.tags.get('account',-1))).fetchall() if ref else []
             reason = ('账户缺少 ID' if not ref else '账户 ID 与玩家资金共用' if ref in money_accounts else '账户 ID 被其他记录共用' if len(matches) != 1 else '')
-            self.station_accounts[station] = {'node':account,'amount':int(attrs.get('amount',0)),'editable':not reason,'reason':reason}
+            return {'node':account,'amount':int(attrs.get('amount',0)),
+                    'min':int(attrs['min']) if 'min' in attrs else None,
+                    'max':int(attrs['max']) if 'max' in attrs else None,
+                    'editable':not reason,'reason':reason}
+        build_by_zone = {}
+        for storage in self.members.get('buildstorage',[]):
+            zone = self.zone(storage)
+            if zone is not None:
+                build_by_zone.setdefault(zone,[]).append(storage)
+        for station in self.members.get('stations', []):
+            account = account_info(station)
+            zone = self.zone(station)
+            builds = build_by_zone.get(zone,[]) if zone is not None else []
+            if len(builds) == 1:
+                account['construction'] = {'storage':builds[0],**account_info(builds[0])}
+            else:
+                account['construction'] = {'storage':None,'node':None,'amount':None,'min':None,'max':None,
+                                           'editable':False,'reason':'未找到唯一关联的建造仓储'}
+            self.station_accounts[station] = account
         self.crew = {}
         progress('整理玩家舰船和船员…')
         # Anonymous crew are direct people/person entries of player assets.
@@ -88,6 +105,16 @@ class Editor:
         self.attrs.cache_clear()
         self.asset.cache_clear()
         self.sector.cache_clear()
+        self.zone.cache_clear()
+
+    @lru_cache(maxsize=50000)
+    def zone(self,n):
+        while n:
+            parent,tag,_ = self.node(n)
+            if tag == self.tags.get('component') and self.attrs(n).get('class') == 'zone':
+                return n
+            n = parent
+        return None
 
     @lru_cache(maxsize=50000)
     def sector(self, n):
@@ -286,6 +313,14 @@ class Editor:
                 amount = integer(c['value'],0,999999999999999)
                 plan.set(account['node'],amount=amount)
                 plan.summaries.append(f'{self.asset_name(station)} / 空间站账户 → {amount:,} Cr')
+            elif kind == 'construction_money':
+                station = integer(c['id'],1,2**63-1)
+                account = self.station_accounts.get(station,{}).get('construction')
+                if not account or not account['editable']:
+                    raise ValueError('未找到可独立修改的空间站建造账户')
+                amount = integer(c['value'],0,999999999999999)
+                plan.set(account['node'],amount=amount)
+                plan.summaries.append(f'{self.asset_name(station)} / 建造资金 → {amount:,} Cr')
             elif kind == 'relation':
                 identity = c['id']
                 if identity not in self.factions or identity == 'player' or 'player' not in self.factions:

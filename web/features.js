@@ -1,5 +1,6 @@
 'use strict';
 const commands = new Map();
+const drafts = new Map();
 let gameHome=null, feature='money', featurePage=0, featureSearch='', selectedShip='', blueprintOwnership='missing';
 let selectedSector='', shipSearch='';
 let includeInternalFactions=false;
@@ -13,17 +14,33 @@ function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefine
 function button(text,fn,cls=''){const b=el('button',text,cls);b.dataset.work='';b.onclick=work(fn);return b;}
 function numberInput(value,min=0,max=''){const n=el('input');n.type='number';n.min=min;n.max=max;n.step='1';n.value=value;n.dataset.work='';return n;}
 function commandKey(c){return [c.kind,c.id||'',c.storage||'',c.skill||''].join(':');}
-function advancedChanges(){const result={};for(const c of changes.values())(result[c.node]??={})[c.key]=c.value;return result;}
+function currentValue(c){const key=commandKey(c), all=c.kind==='crew'?`crew:${c.id}::all`:'';return drafts.get(key)?.value??drafts.get(all)?.value??commands.get(key)?.value??commands.get(all)?.value??c.original;}
+function updateDraftCount(){const count=drafts.size+advancedDrafts.size;const button=$('stageAll');button.textContent=count?`暂存修改 (${count})`:'暂存修改';button.dataset.unavailable=count?'false':'true';button.disabled=!count||busy;}
+function queueDraft(c){
+  const key=commandKey(c), all=c.kind==='crew'&&c.skill!=='all'?`crew:${c.id}::all`:'';
+  const baseline=drafts.get(all)?.value??commands.get(key)?.value??commands.get(all)?.value??c.original;
+  if(c.kind!=='blueprint'&&String(c.value)===String(baseline))drafts.delete(key);
+  else drafts.set(key,c);
+  updateDraftCount();
+}
+function bindDraft(input,make){input.addEventListener(input.tagName==='SELECT'?'change':'input',()=>queueDraft(make(input.value)));return input;}
+async function stagePending(){
+  if(!drafts.size&&!advancedDrafts.size)throw new Error('没有尚未暂存的修改');
+  await stage([...drafts.values()]);drafts.clear();advancedDrafts.clear();updateDraftCount();
+  if(feature==='advanced')renderAttributes();else await renderFeature();
+}
+function advancedChanges(source=changes){const result={};for(const c of source.values())(result[c.node]??={})[c.key]=c.value;return result;}
 async function stage(list){
-  if(!list.length)throw new Error('请先勾选要修改的项目');
+  if(!list.length&&!advancedDrafts.size)throw new Error('请先修改内容');
   const next=new Map(commands);for(const c of list){
     if(c.kind==='crew'&&c.skill==='all')for(const [k,v] of next)if(v.kind==='crew'&&v.id===c.id)next.delete(k);
     next.delete(commandKey(c));next.set(commandKey(c),c);
   }
-  const preview=await job('plan',{commands:[...next.values()],changes:advancedChanges(),gamePath:gamePathValue});
+  const nextChanges=new Map(changes);for(const [key,edit] of advancedDrafts){if(edit.value===edit.original)nextChanges.delete(key);else nextChanges.set(key,edit);}
+  const preview=await job('plan',{commands:[...next.values()],changes:advancedChanges(nextChanges),gamePath:gamePathValue});
+  changes.clear();for(const [key,edit] of nextChanges)changes.set(key,edit);
   commands.clear();for(const [key,c] of next)commands.set(key,c);updateCount();
-  $('status').textContent=`已暂存 ${commands.size} 项功能修改；导出时写入 ${preview.patches} 处。`;
-  await renderFeature();
+  $('status').textContent=`已暂存 ${changes.size+commands.size} 项修改；导出时写入 ${preview.patches} 处。`;
 }
 function appendCommandReview(body){
   for(const [key,c] of commands){
@@ -81,9 +98,10 @@ async function renderFeature(){
   showMode();if(feature==='advanced'||!gameHome)return;
   const parent=$('featureBody');parent.replaceChildren();
   if(feature==='money'){
+    const moneyCommand=value=>({kind:'money',value,original:gameHome.money,label:'玩家金钱（同步共享账户）'});
     const saved=commands.get('money:::');parent.append(el('p','玩家可用资金','muted'),el('div',`${fmt(gameHome.money||0)} Cr`,'money-value'));
-    const box=el('div',undefined,'feature-toolbar');const input=numberInput(saved?.value??gameHome.money??0,0,999999999999999);input.id='moneyAmount';input.setAttribute('aria-label','玩家金钱');box.append(input,button('暂存金钱',()=>stage([{kind:'money',value:input.value,original:gameHome.money,label:'玩家金钱（同步共享账户）'}]),'primary'));
-    parent.append(box);const presets=el('div',undefined,'feature-toolbar');for(const [label,value] of [['100 万',1000000],['1000 万',10000000],['1 亿',100000000],['10 亿',1000000000]])presets.append(button(label,()=>{input.value=value;}));parent.append(presets,el('p','统一修改玩家主账户、同 ID 账户和金钱摘要。输入完成后暂存，再点击右上角导出新存档。','hint'));if(saved)parent.append(el('p',`待导出：${fmt(saved.value)} Cr`,'pending'));
+    const box=el('div',undefined,'feature-toolbar');const input=bindDraft(numberInput(currentValue(moneyCommand(gameHome.money))??0,0,999999999999999),moneyCommand);input.id='moneyAmount';input.setAttribute('aria-label','玩家金钱');box.append(input);
+    parent.append(box);const presets=el('div',undefined,'feature-toolbar');for(const [label,value] of [['100 万',1000000],['1000 万',10000000],['1 亿',100000000],['10 亿',1000000000]])presets.append(button(label,()=>{input.value=value;input.dispatchEvent(new Event('input'));}));parent.append(presets,el('p','统一修改玩家主账户、同 ID 账户和金钱摘要。修改后点击上方“暂存修改”，再导出新存档。','hint'));if(saved)parent.append(el('p',`待导出：${fmt(saved.value)} Cr`,'pending'));
     await renderStationMoney(parent);return;
   }
   if(feature==='cargo'){await renderCargo(parent);return;}
@@ -105,30 +123,37 @@ async function renderFeature(){
   const bulk=el('div',undefined,'feature-toolbar');
   if(feature!=='relations'){
     const all=el('input');all.type='checkbox';all.id='selectFeaturePage';all.setAttribute('aria-label','选择本页');all.onchange=()=>{for(const box of parent.querySelectorAll('[data-pick]')){box.checked=all.checked;box.onchange();}};bulk.append(all,el('label','选择本页'));
-    if(feature==='blueprints')bulk.append(button('解锁所选蓝图',()=>stage(data.rows.filter(r=>selected.has(r.id)).map(r=>({kind:'blueprint',id:r.id,label:`蓝图：${r.name} [${r.id}]`}))),'primary'));
+    if(feature==='blueprints')bulk.append(el('span','勾选即加入草稿，点击上方“暂存修改”统一校验。','muted'));
     else {
       const skill=el('select');skill.id='bulkSkill';skill.setAttribute('aria-label','批量技能');for(const [v,l] of Object.entries(skillNames)){const o=el('option',l);o.value=v;skill.append(o);}const stars=starSelect(15);stars.id='bulkStars';
-      bulk.append(skill,stars,button('应用到所选船员',()=>stage(data.rows.filter(r=>selected.has(r.id)).map(r=>({kind:'crew',id:r.id,skill:skill.value,value:stars.value,label:`${r.ship} / ${r.name} / ${skillNames[skill.value]}`,original:skill.value==='all'?'多项':`${r.skills[skill.value]/3} 星`}))),'primary'));
+      bulk.append(skill,stars,button('设置所选船员',async()=>{
+        const rows=data.rows.filter(r=>selected.has(r.id));if(!rows.length)throw new Error('请先选择船员');
+        for(const r of rows)queueDraft({kind:'crew',id:r.id,skill:skill.value,value:stars.value,label:`${r.ship} / ${r.name} / ${skillNames[skill.value]}`,original:skill.value==='all'?'多项':r.skills[skill.value]});
+        await renderFeature();
+      }));
     }
     parent.append(bulk);
   }
-  const t=table(feature==='relations'?['势力','玩家 → 势力','势力 → 玩家','设为','']:feature==='blueprints'?['选择','蓝图名称 / ID','分类','状态']:['选择','船员 / 岗位','星区','所属资产','技能（星级）','操作']);
+  const t=table(feature==='relations'?['势力','玩家 → 势力','势力 → 玩家','设为']:feature==='blueprints'?['选择','蓝图名称 / ID','分类','状态']:['选择','船员 / 岗位','星区','所属资产','技能（星级）']);
   for(const r of data.rows){
     const tr=el('tr');
     if(feature==='relations'){
       cell(tr,`${r.name} [${r.id}]`);cell(tr,r.outgoing.toFixed(6));cell(tr,r.incoming.toFixed(6));
-      const select=el('select');select.setAttribute('aria-label',`${r.id} 关系`);for(const [value,label] of [[-1,'完全敌对 (-1)'],[-0.1,'敌对 (-0.1)'],[0,'中立 (0)'],[0.01,'友好 (0.01)'],[0.1,'盟友 (0.1)'],[1,'最高关系 (1)']]){const o=el('option',label);o.value=value;select.append(o);}select.value=String(commands.get(`relation:${r.id}::`)?.value??0.1);select.disabled=r.locked;cell(tr,'').append(select);
-      if(r.locked)cell(tr,'游戏锁定');else cell(tr,'').append(button('暂存',()=>stage([{kind:'relation',id:r.id,value:select.value,original:`${r.outgoing} / ${r.incoming}`,label:`势力关系：${r.name}`}])));
+      const relationCommand=value=>({kind:'relation',id:r.id,value,original:`${r.outgoing} / ${r.incoming}`,label:`势力关系：${r.name}`});
+      const select=el('select');select.setAttribute('aria-label',`${r.id} 关系`);const placeholder=el('option','选择目标关系');placeholder.value='';select.append(placeholder);for(const [value,label] of [[-1,'完全敌对 (-1)'],[-0.1,'敌对 (-0.1)'],[0,'中立 (0)'],[0.01,'友好 (0.01)'],[0.1,'盟友 (0.1)'],[1,'最高关系 (1)']]){const o=el('option',label);o.value=value;select.append(o);}select.value=String(drafts.get(commandKey(relationCommand('')))?.value??commands.get(commandKey(relationCommand('')))?.value??'');select.disabled=r.locked;
+      select.onchange=()=>{if(select.value)queueDraft(relationCommand(select.value));else{drafts.delete(commandKey(relationCommand('')));updateDraftCount();}};cell(tr,'').append(select);
+      if(r.locked)cell(tr,'游戏锁定');
     }else{
       const pick=el('input');pick.type='checkbox';pick.setAttribute('aria-label',`选择 ${r.name}`);pick.dataset.pick=r.id;
       if(feature==='blueprints' && (r.owned||commands.has(`blueprint:${r.id}::`)))pick.disabled=true;
-      if(!pick.disabled)pick.onchange=()=>{if(pick.checked)selected.add(r.id);else selected.delete(r.id);};else pick.removeAttribute('data-pick');cell(tr,'').append(pick);
+      if(!pick.disabled)pick.onchange=()=>{if(pick.checked)selected.add(r.id);else selected.delete(r.id);if(feature==='blueprints'){const c={kind:'blueprint',id:r.id,label:`蓝图：${r.name} [${r.id}]`};if(pick.checked)queueDraft(c);else{drafts.delete(commandKey(c));updateDraftCount();}}};else pick.removeAttribute('data-pick');
+      if(feature==='blueprints'&&drafts.has(`blueprint:${r.id}::`)){pick.checked=true;selected.add(r.id);}
+      cell(tr,'').append(pick);
       if(feature==='blueprints'){cell(tr,`${r.name}\n${r.id}`).className='named-cell';cell(tr,groups[r.group]||r.group);cell(tr,r.owned?'已拥有':commands.has(`blueprint:${r.id}::`)?'待解锁':'未拥有');}
       else{
         cell(tr,`${r.name}\n${r.role} · #${r.id}`).className='named-cell';cell(tr,r.sector.name);cell(tr,r.ship);
         const skillBox=el('div',undefined,'crew-skills');const inputs={};
-        for(const k of Object.keys(r.skills)){const label=el('label',skillNames[k]);const pending=commands.get(`crew:${r.id}::${k}`)||commands.get(`crew:${r.id}::all`);const input=starSelect(pending?.value??r.skills[k]);input.setAttribute('aria-label',`${r.id} ${skillNames[k]}`);inputs[k]=input;label.append(input);skillBox.append(label);}cell(tr,'').append(skillBox);
-        cell(tr,'').append(button('暂存此人',()=>stage(Object.entries(inputs).map(([k,input])=>({kind:'crew',id:r.id,skill:k,value:input.value,original:`${r.skills[k]/3} 星`,label:`${r.ship} / ${r.name} / ${skillNames[k]}`})))));
+        for(const k of Object.keys(r.skills)){const label=el('label',skillNames[k]);const make=value=>({kind:'crew',id:r.id,skill:k,value,original:r.skills[k],label:`${r.ship} / ${r.name} / ${skillNames[k]}`});const input=bindDraft(starSelect(currentValue(make(r.skills[k]))),make);input.setAttribute('aria-label',`${r.id} ${skillNames[k]}`);inputs[k]=input;label.append(input);skillBox.append(label);}cell(tr,'').append(skillBox);
       }
     }
     t.body.append(tr);
@@ -138,7 +163,8 @@ async function renderFeature(){
 async function renderStationMoney(parent){
   const section=el('section',undefined,'station-money');
   section.append(el('h3',`玩家空间站资金 · ${fmt(gameHome.stationCount)} 座`),
-                 el('p','每座空间站的账户单独修改。余额为 0 的账户可能在存档中省略 amount，暂存时会补入。','muted'));
+                 el('p','空间站账户和建造仓储账户分别修改。余额为 0 的账户可能在存档中省略 amount，暂存时会补入。','muted'),
+                 el('p','预算栏显示存档账户的 min / max 区间；“未保存”表示存档没有这两个值，游戏内建议预算可能会动态计算。','muted'));
   const bar=el('div',undefined,'feature-toolbar');
   const search=el('input');search.id='stationSearch';search.placeholder='搜索空间站名称 / 识别码 / 星区';search.setAttribute('aria-label','搜索空间站');search.dataset.work='';search.value=stationSearch;
   const filter=async()=>{stationSearch=search.value.trim();stationPage=0;await renderFeature();};
@@ -148,15 +174,27 @@ async function renderStationMoney(parent){
   const all=el('option','全部星区');all.value='';sector.append(all);
   for(const item of data.sectors){const option=el('option',item.name);option.value=item.id;sector.append(option);}
   sector.value=stationSector;sector.onchange=work(async()=>{stationSector=sector.value;stationPage=0;await renderFeature();});bar.append(sector);section.append(bar);
-  const t=table(['空间站','星区','原余额','目标余额','']);
+  const budget=account=>account.min===null&&account.max===null?'未保存':`${account.min===null?'—':fmt(account.min)} / ${account.max===null?'—':fmt(account.max)} Cr`;
+  const t=table(['空间站','星区','空间站资金','建造资金','存档预算区间（站 / 建造）']);
   for(const row of data.rows){
-    const tr=el('tr');cell(tr,`${row.name}${row.code?` · ${row.code}`:''}`).className='named-cell';cell(tr,row.sector.name);cell(tr,`${fmt(row.amount??0)} Cr`);
+    const tr=el('tr');cell(tr,`${row.name}${row.code?` · ${row.code}`:''}`).className='named-cell';cell(tr,row.sector.name);
+    const stationCommand=value=>({kind:'station_money',id:row.id,value,original:row.amount??0,label:`空间站资金：${row.name} · ${row.code||row.id}`});
     const pending=commands.get(`station_money:${row.id}::`);
-    const input=numberInput(pending?.value??row.amount??0,0,999999999999999);input.setAttribute('aria-label',`${row.name} 目标余额`);input.disabled=!row.editable;
-    cell(tr,'').append(input);
-    if(row.editable)cell(tr,'').append(button('暂存',()=>stage([{kind:'station_money',id:row.id,value:input.value,original:row.amount??0,label:`空间站资金：${row.name} · ${row.code||row.id}`}])));
-    else cell(tr,row.reason);
-    if(pending)tr.classList.add('pending');
+    const stationCell=cell(tr,'');stationCell.append(el('span',`${fmt(row.amount??0)} Cr`));
+    const input=bindDraft(numberInput(currentValue(stationCommand(row.amount??0)),0,999999999999999),stationCommand);input.setAttribute('aria-label',`${row.name} 空间站资金目标余额`);input.disabled=!row.editable;
+    const stationControls=el('div',undefined,'account-controls');stationControls.append(input);
+    if(!row.editable)stationControls.append(el('small',row.reason));
+    stationCell.append(stationControls);
+    const build=row.construction;const buildCommand=value=>({kind:'construction_money',id:row.id,value,original:build.amount??0,label:`建造资金：${row.name} · ${row.code||row.id}`});const buildCell=cell(tr,'');buildCell.append(el('span',build.amount===null?'未找到':`${fmt(build.amount)} Cr`));
+    const buildPending=commands.get(`construction_money:${row.id}::`);
+    if(build.node){
+      const buildInput=bindDraft(numberInput(currentValue(buildCommand(build.amount??0)),0,999999999999999),buildCommand);buildInput.setAttribute('aria-label',`${row.name} 建造资金目标余额`);buildInput.disabled=!build.editable;
+      const buildControls=el('div',undefined,'account-controls');buildControls.append(buildInput);
+      if(!build.editable)buildControls.append(el('small',build.reason));
+      buildCell.append(buildControls);
+    }else buildCell.append(el('small',build.reason));
+    cell(tr,`站：${budget(row)}\n建造：${budget(build)}`).className='named-cell';
+    if(pending||buildPending)tr.classList.add('pending');
     t.body.append(tr);
   }
   section.append(t.wrap,el('p',`匹配 ${fmt(data.total)} 座空间站 · 第 ${data.page+1} 页`,'muted'));
@@ -179,16 +217,20 @@ async function renderCargo(parent){
     const ware=el('select');ware.setAttribute('aria-label','选择货物');ware.dataset.work='';
     const amount=numberInput(1,0,2147483647);amount.setAttribute('aria-label','货物目标数量');
     const fill=()=>{ware.replaceChildren();for(const w of compatible.filter(w=>(w.name+' '+w.id).toLowerCase().includes(search.value.toLowerCase()))){const o=el('option',`${w.name} [${w.id}] · ${w.volume} m³`);o.value=w.id;ware.append(o);}};search.oninput=fill;fill();
-    const add=el('div',undefined,'feature-toolbar');add.append(search,ware,amount,button('暂存货物',()=>{if(!ware.value)throw new Error('请选择货物');return stage([{kind:'cargo',id:ware.value,ship:Number(selectedShip),storage:storage.id,value:amount.value,label:`货仓：${compatible.find(w=>w.id===ware.value)?.name||ware.value}`,original:storage.items.find(w=>w.id===ware.value)?.amount??0}]);},'primary'));box.append(add);
+    const add=el('div',undefined,'feature-toolbar');add.append(search,ware,amount,button('加入待修改货物',async()=>{if(!ware.value)throw new Error('请选择货物');queueDraft({kind:'cargo',id:ware.value,ship:Number(selectedShip),storage:storage.id,value:amount.value,label:`货仓：${compatible.find(w=>w.id===ware.value)?.name||ware.value}`,original:storage.items.find(w=>w.id===ware.value)?.amount??0});await renderFeature();}));box.append(add);
     const items=new Map(storage.items.map(w=>[w.id,{...w}]));
     for(const c of commands.values())if(c.kind==='cargo'&&c.storage===storage.id){const w=compatible.find(w=>w.id===c.id);items.set(c.id,{...items.get(c.id),id:c.id,name:w?.name||c.id,amount:c.value,pending:true});}
-    const t=table(['货物','数量','操作']);for(const w of items.values()){
-      const tr=el('tr');cell(tr,`${w.name} [${w.id}]${w.pending?' · 待修改':''}`);const input=numberInput(w.amount);input.setAttribute('aria-label',`${w.id} 数量`);cell(tr,'').append(input);cell(tr,'').append(button('暂存',()=>stage([{kind:'cargo',id:w.id,ship:Number(selectedShip),storage:storage.id,value:input.value,label:`货仓：${w.name}`,original:storage.items.find(v=>v.id===w.id)?.amount??0}])));t.body.append(tr);
+    for(const c of drafts.values())if(c.kind==='cargo'&&c.storage===storage.id){const w=compatible.find(w=>w.id===c.id);items.set(c.id,{...items.get(c.id),id:c.id,name:w?.name||c.id,amount:c.value,pending:true});}
+    const t=table(['货物','数量']);for(const w of items.values()){
+      const make=value=>({kind:'cargo',id:w.id,ship:Number(selectedShip),storage:storage.id,value,label:`货仓：${w.name}`,original:storage.items.find(v=>v.id===w.id)?.amount??0});
+      const tr=el('tr');cell(tr,`${w.name} [${w.id}]${w.pending?' · 待修改':''}`);const input=bindDraft(numberInput(currentValue(make(w.amount))),make);input.setAttribute('aria-label',`${w.id} 数量`);cell(tr,'').append(input);t.body.append(tr);
     }box.append(t.wrap);if(!items.size)box.append(el('p','货仓为空，可在上方添加货物。','muted'));parent.append(box);
   }
   if(!data.storages.length)parent.append(el('p','未找到这艘船的货物仓储组件。弹药和个人背包不属于货仓。','hint'));
 }
 document.querySelectorAll('[data-tab]').forEach(b=>{b.dataset.work='';b.onclick=work(async()=>{feature=b.dataset.tab;featurePage=0;featureSearch='';await renderFeature();});});
+$('stageAll').onclick=work(stagePending);
 $('gameSettings').onclick=()=>$('gameSettingsDialog').showModal();
 $('loadGameData').onclick=work(async()=>{gamePathValue=$('gamePath').value.trim().replace(/^"|"$/g,'');try{localStorage.setItem('x4-game-path',gamePathValue);}catch{}$('gameSettingsDialog').close();if(revision)await loadGameplay();});
 showMode();
+updateDraftCount();
