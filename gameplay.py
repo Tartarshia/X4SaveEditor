@@ -76,11 +76,16 @@ class Editor:
             zone = self.zone(storage)
             if zone is not None:
                 build_by_zone.setdefault(zone,[]).append(storage)
+        stations_by_zone = {}
+        for station in self.members.get('stations', []):
+            zone = self.zone(station)
+            if zone is not None:
+                stations_by_zone.setdefault(zone,[]).append(station)
         for station in self.members.get('stations', []):
             account = account_info(station)
             zone = self.zone(station)
             builds = build_by_zone.get(zone,[]) if zone is not None else []
-            if len(builds) == 1:
+            if len(builds) == 1 and len(stations_by_zone.get(zone,[])) == 1:
                 account['construction'] = {'storage':builds[0],**account_info(builds[0])}
             else:
                 account['construction'] = {'storage':None,'node':None,'amount':None,'min':None,'max':None,
@@ -106,6 +111,7 @@ class Editor:
         self.asset.cache_clear()
         self.sector.cache_clear()
         self.zone.cache_clear()
+        self.station_storages.cache_clear()
 
     @lru_cache(maxsize=50000)
     def zone(self,n):
@@ -222,6 +228,168 @@ class Editor:
                     stack.extend(self.children(connection,'component'))
         return storages
 
+    def station_components(self, root):
+        """Walk one station or build-storage component, excluding docked assets."""
+        stack = [root]
+        while stack:
+            n = stack.pop()
+            attrs = self.attrs(n)
+            cls = attrs.get('class','')
+            if n != root and (cls.startswith('ship_') or cls in ('station','buildstorage','npc')):
+                continue
+            yield n, attrs
+            for connections in self.children(n,'connections'):
+                for connection in self.children(connections,'connection'):
+                    stack.extend(self.children(connection,'component'))
+
+    @lru_cache(maxsize=100)
+    def station_storages(self, root):
+        storages = []
+        productions = {}
+        for n, attrs in self.station_components(root):
+            cls = attrs.get('class')
+            if cls == 'production':
+                macro = attrs.get('macro','')
+                productions[macro] = productions.get(macro,0) + 1
+            if cls != 'storage':
+                continue
+            containers = self.children(n,'cargo')
+            items = []
+            for cargo in containers:
+                for ware in self.children(cargo,'ware'):
+                    item = self.attrs(ware)
+                    wid = item.get('ware','')
+                    items.append({'node':ware,'id':wid,'name':self.game.name(wid),'amount':int(item.get('amount',0)),
+                                  'volume':self.game.wares.get(wid,{}).get('volume')})
+            capacity = self.game.storage(attrs.get('macro',''))
+            used = sum((w['volume'] or 0)*w['amount'] for w in items) if all(w['volume'] is not None for w in items) else None
+            storages.append({'id':n,'macro':attrs.get('macro',''),'name':self.game.model_name(attrs.get('macro','')),
+                             'cargo':containers[0] if len(containers)==1 else None,'ambiguous':len(containers)>1,
+                             'items':items,'used':used,**(capacity or {'capacity':None,'types':[]})})
+        storages.sort(key=lambda storage:storage['id'])
+        return storages, productions
+
+    def station_resources(self, request):
+        stations = [{'id':n,'name':self.asset_name(n),'code':self.assets[n].get('code',''),'sector':self.sector(n)}
+                    for n in self.station_accounts]
+        stations.sort(key=lambda r:(r['sector']['name'],r['name'],r['id']))
+        station = int(request.get('station') or (stations[0]['id'] if stations else 0))
+        if station not in self.station_accounts:
+            raise ValueError('请选择玩家空间站')
+        ordinary, production = self.station_storages(station)
+        construction = self.station_accounts[station]['construction']
+        build_root = construction['storage']
+        building, _ = self.station_storages(build_root) if build_root else ([],{})
+        def indicators(root):
+            result = []
+            reserved = {}
+            for n in self.children(self.first(self.first(root,'trade'),'reservations'),'reservation'):
+                attrs = self.attrs(n)
+                wid = attrs.get('ware','')
+                if wid:
+                    reserved[wid] = reserved.get(wid,0) + int(attrs.get('amount',0))
+            for wid,amount in reserved.items():
+                result.append({'kind':'交易预留','id':wid,'name':self.game.name(wid),'amount':amount})
+            resources = self.first(self.first(root,'build'),'resources')
+            for tag,label in (('shortage','记录的短缺'),('insufficient','记录的不足')):
+                for section in self.children(resources,tag):
+                    for n in self.children(section,'ware'):
+                        attrs = self.attrs(n)
+                        wid = attrs.get('ware','')
+                        if wid:
+                            result.append({'kind':label,'id':wid,'name':self.game.name(wid),'amount':int(attrs.get('amount',0))})
+            return sorted(result,key=lambda r:(r['kind'],r['name'],r['id']))
+        def summarize(storages):
+            summary = {}
+            for storage in storages:
+                for item in storage['items']:
+                    row = summary.setdefault(item['id'],{'id':item['id'],'name':item['name'],'amount':0,
+                                                         'transport':self.game.wares.get(item['id'],{}).get('transport'),
+                                                         'volume':item['volume'],'locations':0})
+                    row['amount'] += item['amount']
+                    row['locations'] += 1
+            return sorted(summary.values(),key=lambda r:(r['name'],r['id']))
+        return {'stations':stations,'station':station,'ordinary':ordinary,'building':building,
+                'ordinaryWares':summarize(ordinary),'buildingWares':summarize(building),
+                'ordinaryIndicators':indicators(station),'buildingIndicators':indicators(build_root) if build_root else [],
+                'constructionReason':construction['reason'] if not build_root else '',
+                'production':[{'macro':k,'name':self.game.model_name(k),'count':v} for k,v in sorted(production.items())],
+                'wares':[{'id':k,'name':v['name'],'volume':v['volume'],'transport':v.get('transport')}
+                         for k,v in self.game.wares.items() if v.get('transport') in ('container','solid','liquid') and v['volume']>0]}
+
+    def plan_station_stock(self, plan, station, build, updates):
+        if station not in self.station_accounts:
+            raise ValueError('请选择玩家空间站')
+        account = self.station_accounts[station]['construction']
+        root = account['storage'] if build else station
+        if not root:
+            raise ValueError('未找到唯一关联的建造仓储')
+        storages, _ = self.station_storages(root)
+        if not storages or any(s['ambiguous'] or s['capacity'] is None or s['capacity']<=0 for s in storages):
+            raise ValueError('无法确认空间站货仓结构或容量')
+        amounts = []
+        originals = []
+        for storage in storages:
+            original = {}
+            for item in storage['items']:
+                wid = item['id']
+                ware = self.game.wares.get(wid)
+                if wid in original or not ware or ware.get('transport') not in storage['types'] or ware['volume']<=0:
+                    raise ValueError('货仓含重复或无法识别的物资记录')
+                original[wid] = item
+            originals.append(original)
+            amounts.append({wid:item['amount'] for wid,item in original.items()})
+        def used(index):
+            return sum(self.game.wares[wid]['volume']*amount for wid,amount in amounts[index].items())
+        for wid,target in updates.items():
+            ware = self.game.wares.get(wid)
+            if not ware or ware.get('transport') not in ('container','solid','liquid') or ware['volume']<=0:
+                raise ValueError('不是本机已识别的可存储物资：' + wid)
+        # Free space first so several edits are checked against their combined final state.
+        for wid,target in updates.items():
+            current = sum(values.get(wid,0) for values in amounts)
+            to_remove = max(0,current-target)
+            for values in amounts:
+                removed = min(values.get(wid,0),to_remove)
+                if removed:
+                    values[wid] -= removed
+                    to_remove -= removed
+            if to_remove:
+                raise ValueError('物资总量与存档记录不一致')
+        for wid,target in updates.items():
+            remaining = target - sum(values.get(wid,0) for values in amounts)
+            ware = self.game.wares[wid]
+            candidates = sorted(range(len(storages)),key=lambda i:(wid not in amounts[i],i))
+            for i in candidates:
+                if ware['transport'] not in storages[i]['types']:
+                    continue
+                free = max(0,int((storages[i]['capacity']-used(i)+1e-7)/ware['volume']))
+                added = min(remaining,free)
+                if added:
+                    amounts[i][wid] = amounts[i].get(wid,0) + added
+                    remaining -= added
+                if not remaining:
+                    break
+            if remaining:
+                raise ValueError(f'{self.game.name(wid)} 超出空间站可用货仓容量，仍差 {remaining:,} 单位')
+        for i,storage in enumerate(storages):
+            if used(i) > storage['capacity'] + 1e-6:
+                raise ValueError('空间站货仓容量不足')
+            additions = []
+            for wid,amount in amounts[i].items():
+                old = originals[i].get(wid)
+                if old and amount != old['amount']:
+                    if amount:plan.set(old['node'],amount=amount)
+                    else:plan.remove_leaf(old['node'])
+                elif not old and amount:
+                    additions.append(element('ware',{'ware':wid,'amount':amount}))
+            if additions:
+                xml = ''.join(additions)
+                plan.add(storage['cargo'] or storage['id'],xml if storage['cargo'] else element('cargo',children=xml))
+        label = '建造仓储' if build else '空间站库存'
+        for wid,target in updates.items():
+            plan.summaries.append(f'{self.asset_name(station)} / {label} / {self.game.name(wid)} → {target:,}')
+
     def view(self, request):
         page = max(0,int(request.get('page',0)))
         query = str(request.get('search','')).lower()
@@ -247,6 +415,8 @@ class Editor:
             rows.sort(key=lambda r:(r['sector']['name'],r['name'],r['id']))
             return {'rows':rows[page*100:(page+1)*100],'total':len(rows),'page':page,
                     'sectors':sorted({r['sector']['id']:r['sector'] for r in ({'sector':self.sector(n)} for n in self.station_accounts)}.values(),key=lambda s:s['name'])}
+        if kind == 'station_resources':
+            return self.station_resources(request)
         if kind == 'relations':
             rows = self.relation_rows()
             hidden = sum(r['id'].lower().startswith('visitor') for r in rows)
@@ -292,6 +462,7 @@ class Editor:
             unique[key] = c
         new_blueprints = []
         cargo_changes = {}
+        stock_changes = {}
         missing_relations = {}
         for c in unique.values():
             kind = c.get('kind')
@@ -321,6 +492,10 @@ class Editor:
                 amount = integer(c['value'],0,999999999999999)
                 plan.set(account['node'],amount=amount)
                 plan.summaries.append(f'{self.asset_name(station)} / 建造资金 → {amount:,} Cr')
+            elif kind in ('station_stock','build_stock'):
+                station = integer(c['id'],1,2**63-1)
+                wid = str(c['storage'])
+                stock_changes.setdefault((station,kind=='build_stock'),{})[wid] = integer(c['value'],0,2147483647)
             elif kind == 'relation':
                 identity = c['id']
                 if identity not in self.factions or identity == 'player' or 'player' not in self.factions:
@@ -421,6 +596,8 @@ class Editor:
             if additions:
                 xml = ''.join(additions)
                 plan.add(data['cargo'] or storage,xml if data['cargo'] else element('cargo',children=xml))
+        for (station,build),updates in stock_changes.items():
+            self.plan_station_stock(plan,station,build,updates)
         return plan
 
 

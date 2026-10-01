@@ -21,8 +21,12 @@ SAVE = '''<savegame><info><game version="900"/><player money="42"/></info>
 <connection><component class="computer" owner="player"><traits><skills piloting="3"/></traits></component></connection>
 <connection><component class="ship_s" owner="enemy"><connections><connection><component class="storage" macro="test_storage"><cargo><ware ware="ore" amount="99"/></cargo></component></connection></connections></component></connection>
 </connections></component><component class="ship_s" id="empty" owner="player" macro="test_ship" code="SYN-001"><connections><connection><component class="storage" macro="test_storage"/></connection></connections></component>
-<component class="zone" id="zone-A"><component class="station" owner="player" name="Factory A" code="ST-A"><account id="station-A" amount="75" min="20" max="100" own="1"/></component><component class="buildstorage" owner="player"><account id="build-A" amount="30" min="10" max="40" own="1"/></component></component>
-<component class="zone" id="zone-B"><component class="station" owner="player" name="Factory B" code="ST-B"><account id="station-B" own="1"/></component><component class="buildstorage" owner="player"><account id="build-B" own="1"/></component></component>
+<component class="zone" id="zone-A"><component class="station" owner="player" name="Factory A" code="ST-A"><account id="station-A" amount="75" min="20" max="100" own="1"/><trade><reservations><reservation ware="ore" amount="1"/></reservations></trade><build><resources><shortage><ware ware="ice" amount="4"/></shortage></resources></build><connections>
+<connection><component class="storage" macro="test_storage"><cargo><ware ware="ore" amount="2"/></cargo></component></connection>
+<connection><component class="storage" macro="test_storage"><cargo><ware ware="ore" amount="3"/></cargo></component></connection>
+<connection><component class="production" macro="test_production"/></connection></connections></component>
+<component class="buildstorage" owner="player"><account id="build-A" amount="30" min="10" max="40" own="1"/><build><resources><insufficient><ware ware="energycells" amount="8"/></insufficient></resources></build><connections><connection><component class="storage" macro="test_build_storage"><cargo><ware ware="energycells" amount="10"/></cargo></component></connection></connections></component></component>
+<component class="zone" id="zone-B"><component class="station" owner="player" name="Factory B" code="ST-B"><account id="station-B" own="1"/><connections><connection><component class="storage" macro="test_storage"/></connection></connections></component><component class="buildstorage" owner="player"><account id="build-B" own="1"/></component></component>
 <component class="station" owner="enemy" name="Enemy Factory"><account id="enemy-cash" amount="600"/></component>
 </universe><stats><stat id="money_player" value="42"/></stats><unchanged quoted='yes'><!-- keep bytes --></unchanged></savegame>'''
 
@@ -60,6 +64,8 @@ def make_game(root):
         't/0001-l086.xml':'<language><page id="1"><t id="1">矿石</t><t id="2">冰</t><t id="3">测试引擎</t><t id="4">测试联邦</t><t id="5">测试运输舰</t></page></language>',
         'assets/test/macros/test_ship.xml':'<macros><macro name="test_ship"><properties><identification name="{1,5}"/></properties></macro></macros>',
         'assets/test/macros/test_storage.xml':'<macros><macro><properties><cargo max="100" tags="solid"/></properties></macro></macros>',
+        'assets/test/macros/test_build_storage.xml':'<macros><macro><properties><cargo max="100" tags="container"/></properties></macro></macros>',
+        'assets/test/macros/test_production.xml':'<macros><macro name="test_production"><properties><identification name="Test Production"/></properties></macro></macros>',
     }
     for relative,text in files.items():
         path = root / relative
@@ -103,6 +109,9 @@ class GameplayTests(unittest.TestCase):
             {'kind':'station_money','id':station_b,'value':'50'},
             {'kind':'construction_money','id':station_a,'value':'700'},
             {'kind':'construction_money','id':station_b,'value':'60'},
+            {'kind':'station_stock','id':station_a,'storage':'ore','value':'12'},
+            {'kind':'build_stock','id':station_a,'storage':'energycells','value':'50'},
+            {'kind':'station_stock','id':station_b,'storage':'ore','value':'5'},
             {'kind':'relation','id':'argon','value':'0.1'},
             {'kind':'relation','id':'teladi','value':'0'},
             {'kind':'blueprint','id':'new_engine'},
@@ -119,6 +128,11 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(tree.find('.//account[@id="build-A"]').get('min'),'10')
         self.assertEqual(tree.find('.//account[@id="build-A"]').get('max'),'40')
         self.assertEqual(tree.find('.//account[@id="build-B"]').get('amount'),'60')
+        station_a_xml=tree.find('.//component[@name="Factory A"]')
+        self.assertEqual([w.get('amount') for w in station_a_xml.findall('.//component[@class="storage"]/cargo/ware[@ware="ore"]')],['9','3'])
+        self.assertEqual(tree.find('.//component[@class="buildstorage"]/connections/connection/component/cargo/ware').get('amount'),'50')
+        station_b_xml=tree.find('.//component[@name="Factory B"]')
+        self.assertEqual(station_b_xml.find('.//component[@class="storage"]/cargo/ware').get('amount'),'5')
         self.assertEqual(tree.find('.//account[@id="enemy-cash"]').get('amount'),'600')
         self.assertEqual(tree.find('info/player').get('money'),'123456')
         self.assertEqual(tree.find('stats/stat').get('value'),'123456')
@@ -156,6 +170,9 @@ class GameplayTests(unittest.TestCase):
                [{'kind':'station_money','id':next(iter(e.station_accounts)),'value':-1}],
                [{'kind':'construction_money','id':999999999,'value':100}],
                [{'kind':'construction_money','id':next(iter(e.station_accounts)),'value':-1}],
+               [{'kind':'station_stock','id':999999999,'storage':'ore','value':1}],
+               [{'kind':'station_stock','id':next(iter(e.station_accounts)),'storage':'ore','value':21}],
+               [{'kind':'build_stock','id':next(iter(e.station_accounts)),'storage':'ore','value':1}],
                [{'kind':'crew','id':next(iter(e.crew)),'value':16}]]
         for commands in bad:
             with self.subTest(commands=commands),self.assertRaises(ValueError):e.plan(commands).compile()
@@ -180,8 +197,8 @@ class GameplayTests(unittest.TestCase):
 
     def test_buildstorage_must_be_uniquely_associated(self):
         source=self.root/'ambiguous.xml'
-        source.write_text(SAVE.replace('<component class="buildstorage" owner="player"><account id="build-A" amount="30" min="10" max="40" own="1"/></component>',
-                                      '<component class="buildstorage" owner="player"><account id="build-A" amount="30" own="1"/></component><component class="buildstorage" owner="player"><account id="build-extra" own="1"/></component>'),'utf-8')
+        source.write_text(SAVE.replace('<component class="buildstorage" owner="player"><account id="build-A"',
+                                      '<component class="buildstorage" owner="player"><account id="build-extra"/></component><component class="buildstorage" owner="player"><account id="build-A"'),'utf-8')
         folder,_=core.build_index(source,self.root/'cache')
         editor=Editor(folder,self.root/'game')
         try:
@@ -192,6 +209,32 @@ class GameplayTests(unittest.TestCase):
         finally:
             editor.close()
 
+    def test_station_resources_are_separate_from_build_storage(self):
+        data=self.editor.view({'kind':'station_resources'})
+        stations={r['name']:r['id'] for r in data['stations']}
+        self.assertEqual(set(stations),{'Factory A','Factory B'})
+        data=self.editor.view({'kind':'station_resources','station':stations['Factory A']})
+        self.assertEqual(len(data['ordinary']),2)
+        self.assertEqual([(w['id'],w['amount']) for w in data['ordinaryWares']],[('ore',5)])
+        self.assertEqual([(w['id'],w['amount']) for w in data['buildingWares']],[('energycells',10)])
+        self.assertEqual(data['production'][0]['count'],1)
+        self.assertEqual({(r['kind'],r['id'],r['amount']) for r in data['ordinaryIndicators']},{('交易预留','ore',1),('记录的短缺','ice',4)})
+        self.assertEqual([(r['id'],r['amount']) for r in data['buildingIndicators']],[('energycells',8)])
+        self.assertEqual(self.editor.view({'kind':'station_resources','station':stations['Factory B']})['building'],[])
+
+    def test_station_stock_combined_capacity_and_missing_build_storage(self):
+        e=self.editor
+        a=next(n for n in e.station_accounts if e.asset_name(n)=='Factory A')
+        b=next(n for n in e.station_accounts if e.asset_name(n)=='Factory B')
+        for commands in (
+            [{'kind':'station_stock','id':a,'storage':'ore','value':15},
+             {'kind':'station_stock','id':a,'storage':'ice','value':15}],
+            [{'kind':'build_stock','id':b,'storage':'energycells','value':1}],
+            [{'kind':'station_stock','id':a,'storage':'unknown','value':1}],
+        ):
+            with self.subTest(commands=commands),self.assertRaises(ValueError):
+                e.plan(commands).compile()
+
     def test_buildstorage_requires_a_zone(self):
         source=self.root/'no-zone.xml'
         source.write_text(SAVE.replace('class="zone" id="zone-A"','class="collection" id="zone-A"'),'utf-8')
@@ -201,6 +244,20 @@ class GameplayTests(unittest.TestCase):
             rows={r['name']:r for r in editor.view({'kind':'station_money'})['rows']}
             self.assertFalse(rows['Factory A']['construction']['editable'])
             self.assertTrue(rows['Factory B']['construction']['editable'])
+        finally:
+            editor.close()
+
+    def test_buildstorage_requires_one_station_in_zone(self):
+        source=self.root/'two-stations.xml'
+        source.write_text(SAVE.replace('<component class="buildstorage" owner="player"><account id="build-A"',
+                                      '<component class="station" owner="player" name="Extra"><account id="extra"/></component><component class="buildstorage" owner="player"><account id="build-A"'),'utf-8')
+        folder,_=core.build_index(source,self.root/'cache')
+        editor=Editor(folder,self.root/'game')
+        try:
+            rows={r['name']:r for r in editor.view({'kind':'station_money'})['rows']}
+            self.assertFalse(rows['Factory A']['construction']['editable'])
+            self.assertFalse(rows['Extra']['construction']['editable'])
+            self.assertEqual(editor.view({'kind':'station_resources','station':rows['Factory A']['id']})['building'],[])
         finally:
             editor.close()
 

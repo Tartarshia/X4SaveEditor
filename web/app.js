@@ -50,7 +50,7 @@ async function openSave(path) {
   if ((changes.size || commands.size || drafts.size || advancedDrafts.size) && !confirm('打开其他存档会丢弃待修改清单和未暂存输入，继续？')) return;
   $('openDialog').close();
   const data=await job('open',{path});
-  changes.clear(); commands.clear(); drafts.clear(); advancedDrafts.clear(); updateDraftCount(); selectedShip=''; selectedSector=''; shipSearch=''; includeInternalFactions=false; featurePage=0; stationPage=0; stationSearch=''; stationSector=''; updateCount(); history=[];
+  changes.clear(); commands.clear(); drafts.clear(); advancedDrafts.clear(); updateDraftCount(); selectedShip=''; selectedSector=''; shipSearch=''; resourceStation=''; includeInternalFactions=false; featurePage=0; stationPage=0; stationSearch=''; stationSector=''; updateCount(); history=[];
   gameHome=null;
   $('featureBody').textContent='正在识别玩家账户、舰船和船员…';
   shortcutCatalog=[];

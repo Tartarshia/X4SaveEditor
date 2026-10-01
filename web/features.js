@@ -5,9 +5,10 @@ let gameHome=null, feature='money', featurePage=0, featureSearch='', selectedShi
 let selectedSector='', shipSearch='';
 let includeInternalFactions=false;
 let stationSearch='', stationSector='', stationPage=0;
+let resourceStation='';
 let gamePathValue='';
 try { gamePathValue=localStorage.getItem('x4-game-path')||''; } catch {}
-const titles={money:'玩家金钱',relations:'势力关系',cargo:'飞船货仓',blueprints:'解锁蓝图',crew:'船员技能'};
+const titles={money:'玩家金钱',station_resources:'空间站资源',relations:'势力关系',cargo:'飞船货仓',blueprints:'解锁蓝图',crew:'船员技能'};
 const skillNames={all:'全部五项技能',piloting:'驾驶',management:'管理',engineering:'工程',boarding:'登舰',morale:'士气'};
 const groups={ships:'舰船',engines:'引擎',shields:'护盾',weapons:'武器',turrets:'炮塔',missiles:'导弹',drones:'无人机',countermeasures:'干扰弹',deployables:'部署物',modules:'空间站模块'};
 function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
@@ -105,6 +106,7 @@ async function renderFeature(){
     await renderStationMoney(parent);return;
   }
   if(feature==='cargo'){await renderCargo(parent);return;}
+  if(feature==='station_resources'){await renderStationResources(parent);return;}
   const bar=searchBar(parent);
   if(feature==='crew')shipPicker(bar,true);
   if(feature==='blueprints'){
@@ -201,6 +203,86 @@ async function renderStationMoney(parent){
   if(stationPage)section.append(button('上一页',async()=>{stationPage--;await renderFeature();}));
   if((stationPage+1)*100<data.total)section.append(button('下一页',async()=>{stationPage++;await renderFeature();}));
   parent.append(section);
+}
+async function renderStationResources(parent){
+  const data=await job('gameplay',{kind:'station_resources',station:resourceStation,gamePath:gamePathValue});
+  resourceStation=String(data.station);
+  const current=data.stations.find(s=>String(s.id)===resourceStation);
+  const pickerBar=el('div',undefined,'feature-toolbar');
+  const search=el('input');search.placeholder='搜索空间站名称 / 识别码';search.setAttribute('aria-label','搜索空间站');
+  const sector=el('select');sector.setAttribute('aria-label','筛选空间站星区');sector.dataset.work='';
+  const all=el('option','全部星区');all.value='';sector.append(all);
+  const sectors=[...new Map(data.stations.map(s=>[s.sector.id,s.sector])).values()].sort((a,b)=>a.name.localeCompare(b.name));
+  for(const s of sectors){const option=el('option',s.name);option.value=s.id;sector.append(option);}
+  const picker=el('select');picker.setAttribute('aria-label','选择空间站');picker.dataset.work='';
+  const fill=()=>{
+    picker.replaceChildren();const groups=new Map();const query=search.value.trim().toLowerCase();
+    for(const s of data.stations){
+      if(String(s.id)!==resourceStation && ((sector.value&&sector.value!==s.sector.id)||!(s.name+' '+s.code).toLowerCase().includes(query)))continue;
+      if(!groups.has(s.sector.id)){const group=el('optgroup');group.label=s.sector.name;groups.set(s.sector.id,group);picker.append(group);}
+      const option=el('option',`${s.name}${s.code?' · '+s.code:''}`);option.value=s.id;groups.get(s.sector.id).append(option);
+    }
+    picker.value=resourceStation;
+  };
+  search.oninput=fill;sector.onchange=fill;picker.onchange=work(async()=>{resourceStation=picker.value;await renderFeature();});fill();
+  pickerBar.append(search,sector,picker);parent.append(pickerBar);
+  if(!current){parent.append(el('p','没有玩家空间站。','empty'));return;}
+  parent.append(el('p',`${current.name}${current.code?' · '+current.code:''}　|　${current.sector.name}`,'resource-station-title'),
+                el('p','按物资汇总空间站实体货仓；建造仓储独立列出。修改的是库存总量，暂存时按货仓类型、单件体积和剩余容量分配到实体货仓。经理的自动配额、交易订单和生产逻辑不会随库存一同修改。','muted'));
+  const renderGroup=(title,kind,storages,listed,indicators,reason='')=>{
+    const section=el('section',undefined,'resource-group');
+    section.append(el('h3',`${title} · ${storages.length} 个货仓 · ${listed.length} 种现有物资`));
+    if(reason)section.append(el('p',reason,'hint'));
+    const editable=storages.length>0&&storages.every(s=>s.capacity!==null&&!s.ambiguous);
+    if(!editable&&storages.length)section.append(el('p','部分货仓的容量或结构无法确认，此组库存暂时只读。','hint'));
+    if(storages.length){
+      const details=el('details',undefined,'resource-storage-details');details.append(el('summary','查看实体货仓与容量'));
+      const tableData=table(['货仓','类型','已用 / 总容量']);
+      for(const s of storages){const tr=el('tr');cell(tr,`${s.name}\n${s.macro}`).className='named-cell';cell(tr,s.types.join(' / ')||'未知');cell(tr,`${s.used===null?'未知':fmt(s.used)} / ${s.capacity===null?'未知':fmt(s.capacity)} m³`);tableData.body.append(tr);}
+      details.append(tableData.wrap);section.append(details);
+    }
+    const rows=new Map(listed.map(w=>[w.id,{...w}]));
+    for(const c of [...commands.values(),...drafts.values()])if(c.kind===kind&&String(c.id)===resourceStation&&!rows.has(c.storage)){
+      const ware=data.wares.find(w=>w.id===c.storage);rows.set(c.storage,{id:c.storage,name:ware?.name||c.storage,amount:0,volume:ware?.volume,transport:ware?.transport,locations:0});
+    }
+    const filter=el('input');filter.placeholder='筛选物资名称 / ID';filter.setAttribute('aria-label',`${title}筛选物资`);section.append(filter);
+    const t=table(['物资 / ID','当前总量','目标总量','单件体积','分布货仓']);
+    for(const w of [...rows.values()].sort((a,b)=>a.name.localeCompare(b.name)||a.id.localeCompare(b.id))){
+      const tr=el('tr');cell(tr,`${w.name}\n${w.id}`).className='named-cell';cell(tr,fmt(w.amount));
+      const make=value=>({kind,id:data.station,storage:w.id,value,original:w.amount,label:`${current.name} / ${title} / ${w.name} [${w.id}]`});
+      const input=bindDraft(numberInput(currentValue(make(w.amount)),0,2147483647),make);input.setAttribute('aria-label',`${title} ${w.id} 目标总量`);input.disabled=!editable;cell(tr,'').append(input);
+      cell(tr,w.volume===undefined?'未知':`${fmt(w.volume)} m³`);cell(tr,fmt(w.locations));
+      if(commands.has(commandKey(make(w.amount)))||drafts.has(commandKey(make(w.amount))))tr.classList.add('pending');
+      t.body.append(tr);
+    }
+    filter.oninput=()=>{const q=filter.value.trim().toLowerCase();for(const tr of t.body.rows)tr.hidden=!tr.cells[0].textContent.toLowerCase().includes(q);};
+    section.append(t.wrap);
+    if(!rows.size)section.append(el('p','当前没有存储物资。','muted'));
+    if(indicators.length){
+      const details=el('details',undefined,'resource-storage-details');details.append(el('summary',`查看交易预留与存档缺口 · ${indicators.length} 条`));
+      details.append(el('p','这些是单独的状态记录，不计入上方实体货仓库存。','muted'));
+      const t=table(['记录类型','物资 / ID','数量']);for(const item of indicators){const tr=el('tr');cell(tr,item.kind);cell(tr,`${item.name}\n${item.id}`).className='named-cell';cell(tr,fmt(item.amount));t.body.append(tr);}details.append(t.wrap);section.append(details);
+    }
+    if(editable){
+      const types=new Set(storages.flatMap(s=>s.types));const compatible=data.wares.filter(w=>types.has(w.transport));
+      const add=el('div',undefined,'feature-toolbar');const wareSearch=el('input');wareSearch.placeholder='搜索可加入物资';wareSearch.setAttribute('aria-label',`${title}搜索可加入物资`);
+      const ware=el('select');ware.setAttribute('aria-label',`${title}选择物资`);ware.dataset.work='';
+      const fillWares=()=>{ware.replaceChildren();for(const w of compatible.filter(w=>(w.name+' '+w.id).toLowerCase().includes(wareSearch.value.toLowerCase()))){const option=el('option',`${w.name} [${w.id}]`);option.value=w.id;ware.append(option);}};
+      wareSearch.oninput=fillWares;fillWares();const amount=numberInput(1,0,2147483647);amount.setAttribute('aria-label',`${title}新增目标总量`);
+      add.append(wareSearch,ware,amount,button('加入待修改物资',async()=>{
+        if(!ware.value)throw new Error('请选择物资');const item=rows.get(ware.value),catalog=data.wares.find(w=>w.id===ware.value);
+        queueDraft({kind,id:data.station,storage:ware.value,value:amount.value,original:item?.amount??0,
+                    label:`${current.name} / ${title} / ${catalog?.name||ware.value} [${ware.value}]`});await renderFeature();
+      }));section.append(add);
+    }
+    parent.append(section);
+  };
+  renderGroup('空间站库存','station_stock',data.ordinary,data.ordinaryWares,data.ordinaryIndicators);
+  renderGroup('建造仓储物资','build_stock',data.building,data.buildingWares,data.buildingIndicators,data.constructionReason);
+  const production=el('section',undefined,'resource-group');production.append(el('h3',`生产模块 · ${data.production.reduce((sum,p)=>sum+p.count,0)} 个`));
+  if(data.production.length){const t=table(['模块名称','数量','macro']);for(const p of data.production){const tr=el('tr');cell(tr,p.name);cell(tr,fmt(p.count));cell(tr,p.macro);t.body.append(tr);}production.append(t.wrap);}
+  else production.append(el('p','没有识别到生产模块。','muted'));
+  parent.append(production);
 }
 function starSelect(value){const s=el('select');s.dataset.work='';for(let i=0;i<=15;i++){const o=el('option',`${Number((i/3).toFixed(2))} 星`);o.value=i;s.append(o);}s.value=String(value);return s;}
 async function renderCargo(parent){
