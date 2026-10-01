@@ -1,0 +1,52 @@
+// Optional browser check; prepare the synthetic save and game with test_gameplay.DIPLOMACY_SAVE/make_game.
+const {chromium}=require(process.env.X4_PLAYWRIGHT_MODULE||'playwright');
+const assert=require('node:assert/strict');
+const path=require('node:path');
+(async()=>{
+  const browser=await chromium.launch({channel:'msedge',headless:true});
+  const page=await browser.newPage({viewport:{width:1440,height:900}});
+  const errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const base=process.env.X4_WEB_URL||'http://127.0.0.1:8765';
+  const wait=async()=>page.waitForFunction(()=>!busy);
+  try{
+    await page.goto(base);await page.waitForFunction(()=>token.length>10);
+    await page.locator('#open').click();
+    await page.locator('#sourcePath').fill(path.resolve(__dirname,'../.local/diplomacy-smoke/save.xml'));
+    await page.locator('#openPath').click();
+    await page.locator('#moneyAmount').waitFor();await wait();
+    await page.locator('#gameSettings').click();
+    await page.locator('#gamePath').fill(path.resolve(__dirname,'../.local/diplomacy-smoke/game'));
+    await page.locator('#loadGameData').click();await wait();
+    await page.locator('[data-tab=diplomacy]').click();await wait();
+    assert((await page.locator('#featureBody').textContent()).includes('特工 · 1 人'));
+    assert.equal(await page.getByRole('spinbutton',{name:'外交影响力目标值'}).inputValue(),'12');
+    assert.equal(await page.getByRole('spinbutton',{name:'外交影响力目标值'}).getAttribute('max'),'300');
+    await page.getByRole('spinbutton',{name:'外交影响力目标值'}).fill('300');
+    await page.getByRole('combobox',{name:'势力 A'}).selectOption('argon');await wait();
+    await page.getByRole('combobox',{name:'势力 B'}).selectOption('teladi');await wait();
+    await page.getByRole('spinbutton',{name:'势力间目标关系'}).fill('0.1');
+    const agent=page.locator('.diplomacy-card').last();
+    assert.equal(await agent.getByRole('spinbutton',{name:/谈判经验/}).getAttribute('max'),'200');
+    await agent.getByRole('combobox',{name:/谈判等级/}).selectOption('4');
+    assert.equal(await agent.getByRole('spinbutton',{name:/谈判经验/}).inputValue(),'100');
+    await agent.getByRole('spinbutton',{name:/谍报经验/}).fill('200');
+    assert.equal(await agent.getByRole('combobox',{name:/谍报等级/}).inputValue(),'5');
+    assert.equal(await page.locator('#stageAll').textContent(),'暂存修改 (4)');
+    await page.locator('#stageAll').click();await wait();
+    assert.equal(await page.locator('#changeCount').textContent(),'4');
+    await page.locator('#export').click();await page.locator('#exportName').fill('diplomacy-browser.xml');
+    await page.locator('#confirmExport').click();await page.locator('#resultDialog').waitFor();
+    const url=await page.locator('#download').getAttribute('href');
+    const xml=await(await page.request.get(base+url)).text();
+    assert(xml.includes('<diplomacy influence="300">'));
+    assert(xml.includes('name="$diplomacy_exp_negotiation" type="integer" value="100"'));
+    assert(xml.includes('name="$diplomacy_exp_espionage" type="integer" value="200"'));
+    assert(xml.includes('faction="teladi" relation="0.1"'));
+    assert(xml.includes('faction="argon" relation="0.1"'));
+    await page.locator('#resultDialog [data-close]').click();
+    await page.setViewportSize({width:700,height:850});
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    assert.deepEqual(errors,[]);
+    console.log('PASS: diplomacy influence, faction pair, agent experience and level, staged export, narrow layout');
+  }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});

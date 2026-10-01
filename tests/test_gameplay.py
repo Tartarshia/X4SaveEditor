@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 
 import core
 from game_data import GameData
-from gameplay import Editor
+from gameplay import Editor, agent_level
 
 SAVE = '''<savegame><info><game version="900"/><player money="42"/></info>
 <universe><factions><faction id="player"><account id="cash" amount="42"/></faction>
@@ -29,6 +29,11 @@ SAVE = '''<savegame><info><game version="900"/><player money="42"/></info>
 <component class="zone" id="zone-B"><component class="station" owner="player" name="Factory B" code="ST-B"><account id="station-B" own="1"/><connections><connection><component class="storage" macro="test_storage"/></connection></connections></component><component class="buildstorage" owner="player"><account id="build-B" own="1"/></component></component>
 <component class="station" owner="enemy" name="Enemy Factory"><account id="enemy-cash" amount="600"/></component>
 </universe><stats><stat id="money_player" value="42"/></stats><unchanged quoted='yes'><!-- keep bytes --></unchanged></savegame>'''
+
+DIPLOMACY_SAVE = (SAVE.replace('<component class="player" owner="player" lastcontrolled="ship"><blueprints>',
+    '<component class="player" owner="player" lastcontrolled="ship"><diplomacy influence="12"><agents><agent component="agent-npc" faction="player"/></agents></diplomacy><blueprints>')
+    .replace('<component class="npc" owner="player" name="Captain"><traits>',
+    '<component class="npc" owner="player" name="Captain" id="agent-npc"><blackboard><value name="$diplomacy_exp_negotiation" type="integer" value="19"/><value name="$diplomacy_exp_espionage" type="integer" value="49"/></blackboard><traits>'))
 
 
 SECTOR_SAVE = '''<savegame><info><player money="42"/></info><universe>
@@ -234,6 +239,54 @@ class GameplayTests(unittest.TestCase):
         ):
             with self.subTest(commands=commands),self.assertRaises(ValueError):
                 e.plan(commands).compile()
+
+    def test_diplomacy_influence_agent_levels_and_faction_pair(self):
+        self.assertEqual([agent_level(x) for x in (0,9,10,19,20,49,50,99,100,199,200,999)],
+                         [0,0,1,1,2,2,3,3,4,4,5,5])
+        source=self.root/'diplomacy.xml';source.write_text(DIPLOMACY_SAVE,'utf-8')
+        folder,_=core.build_index(source,self.root/'cache')
+        editor=Editor(folder,self.root/'game')
+        try:
+            data=editor.view({'kind':'diplomacy','source':'argon','target':'teladi'})
+            self.assertEqual(data['influence'],12)
+            self.assertEqual(len(data['agents']),1)
+            agent=data['agents'][0]
+            self.assertTrue(agent['editable'])
+            self.assertEqual(agent['levels'],{'negotiation':1,'espionage':2})
+            self.assertIsNone(data['pair']['forward']['base'])
+            dest=self.root/'diplomacy-export.xml.gz'
+            editor.plan([{'kind':'influence','value':300},
+                         {'kind':'agent_exp','id':agent['id'],'storage':'negotiation','value':100},
+                         {'kind':'agent_exp','id':agent['id'],'storage':'espionage','value':200},
+                         {'kind':'npc_relation','id':'argon','storage':'teladi','value':0.1}]).export({},dest,lambda m:None)
+            with gzip.open(dest,'rt',encoding='utf-8') as f:tree=ET.fromstring(f.read())
+            self.assertEqual(tree.find('.//component[@class="player"]/diplomacy').get('influence'),'300')
+            values={n.get('name'):n.get('value') for n in tree.findall('.//component[@id="agent-npc"]/blackboard/value')}
+            self.assertEqual(values['$diplomacy_exp_negotiation'],'100')
+            self.assertEqual(values['$diplomacy_exp_espionage'],'200')
+            self.assertEqual(tree.find('.//faction[@id="argon"]/relations/relation[@faction="teladi"]').get('relation'),'0.1')
+            self.assertEqual(tree.find('.//faction[@id="teladi"]/relations/relation[@faction="argon"]').get('relation'),'0.1')
+            for bad in ([{'kind':'npc_relation','id':'argon','storage':'xenon','value':1}],
+                        [{'kind':'agent_exp','id':agent['id'],'storage':'negotiation','value':-1}],
+                        [{'kind':'agent_exp','id':agent['id'],'storage':'negotiation','value':201}],
+                        [{'kind':'influence','value':301}],
+                        [{'kind':'influence','value':'NaN'}]):
+                with self.subTest(bad=bad),self.assertRaises(ValueError):editor.plan(bad).compile()
+        finally:editor.close()
+
+    def test_missing_agent_experience_can_be_added_once(self):
+        source=self.root/'missing-agent-exp.xml'
+        source.write_text(DIPLOMACY_SAVE.replace('<value name="$diplomacy_exp_espionage" type="integer" value="49"/>',''),'utf-8')
+        folder,_=core.build_index(source,self.root/'cache')
+        editor=Editor(folder,self.root/'game')
+        try:
+            agent=editor.view({'kind':'diplomacy'})['agents'][0]
+            self.assertEqual(agent['experience']['espionage'],0)
+            dest=self.root/'added-agent-exp.xml.gz'
+            editor.plan([{'kind':'agent_exp','id':agent['id'],'storage':'espionage','value':50}]).export({},dest,lambda m:None)
+            with gzip.open(dest,'rt',encoding='utf-8') as f:tree=ET.fromstring(f.read())
+            self.assertEqual(tree.find('.//component[@id="agent-npc"]/blackboard/value[@name="$diplomacy_exp_espionage"]').get('value'),'50')
+        finally:editor.close()
 
     def test_buildstorage_requires_a_zone(self):
         source=self.root/'no-zone.xml'

@@ -10,6 +10,10 @@ from game_data import GameData, DEFAULT_GAME
 import shortcuts
 
 SKILLS = ('piloting', 'management', 'engineering', 'boarding', 'morale')
+DIPLOMACY_EXPERIENCE = {'negotiation':'$diplomacy_exp_negotiation','espionage':'$diplomacy_exp_espionage'}
+AGENT_LEVEL_MINIMUM = (0,10,20,50,100,200)
+INFLUENCE_EDIT_MAX = 300
+AGENT_EXPERIENCE_EDIT_MAX = 200
 
 
 def integer(value, low, high):
@@ -19,6 +23,10 @@ def integer(value, low, high):
     if not low <= value <= high:
         raise ValueError(f'数值必须在 {low} 至 {high} 之间')
     return value
+
+
+def agent_level(experience):
+    return max(i for i,minimum in enumerate(AGENT_LEVEL_MINIMUM) if experience >= minimum)
 
 
 class Editor:
@@ -55,6 +63,7 @@ class Editor:
         for universe in self.children(root,'universe'):
             for parent in self.children(universe,'factions'):
                 self.factions.update({self.attrs(n).get('id'):n for n in self.children(parent,'faction')})
+        self.diplomacy_node = self.first(self.player,'diplomacy')
         self.owned = {self.attrs(n).get('ware') for n in self.children(self.first(self.player,'blueprints'),'blueprint')}
         self.station_accounts = {}
         money_accounts = {self.attrs(n).get('id') for n in self.members.get('money',[]) if self.names[self.node(n)[1]] == 'account'}
@@ -112,6 +121,7 @@ class Editor:
         self.sector.cache_clear()
         self.zone.cache_clear()
         self.station_storages.cache_clear()
+        self.diplomacy_agents.cache_clear()
 
     @lru_cache(maxsize=50000)
     def zone(self,n):
@@ -199,6 +209,78 @@ class Editor:
                 values.append(sum(float(a.get('relation',0)) for a in parts))
             result.append({'id':identity,'name':self.game.name(identity),'outgoing':values[0],'incoming':values[1],'locked':locked})
         return result
+
+    def diplomacy_factions(self):
+        rows = []
+        for identity,node in self.factions.items():
+            if not identity or identity == 'player' or identity.lower().startswith('visitor'):
+                continue
+            tags = set(self.game.factions.get(identity,{}).get('tags','').split())
+            if 'hidden' in tags:
+                continue
+            relations = self.first(node,'relations')
+            rows.append({'id':identity,'name':self.game.name(identity),'locked':self.attrs(relations).get('locked')=='1',
+                         'notSelectable':'nodiplomacyselection' in tags})
+        return sorted(rows,key=lambda r:(r['name'],r['id']))
+
+    def diplomacy_pair(self, first, second):
+        if first == second or first not in self.factions or second not in self.factions:
+            raise ValueError('请选择两个不同的势力')
+        values = []
+        for source,target in ((first,second),(second,first)):
+            parent = self.first(self.factions[source],'relations')
+            base = [float(self.attrs(n).get('relation',0)) for n in self.children(parent,'relation')
+                    if self.attrs(n).get('faction')==target]
+            temporary = sum(float(self.attrs(n).get('relation',0)) for n in self.children(parent,'booster')
+                            if self.attrs(n).get('faction')==target)
+            values.append({'base':base[0] if len(base)==1 else None,'recordCount':len(base),
+                           'temporary':temporary,'locked':self.attrs(parent).get('locked')=='1'})
+        return {'source':first,'target':second,'forward':values[0],'reverse':values[1],
+                'editable':not any(v['locked'] or v['recordCount']>1 for v in values)}
+
+    @lru_cache(maxsize=1)
+    def diplomacy_agents(self):
+        agents = []
+        entries = self.children(self.first(self.diplomacy_node,'agents'),'agent')
+        refs = [self.attrs(n).get('component','') for n in entries]
+        for entry,ref in zip(entries,refs):
+            matches = self.db.execute('SELECT n.id FROM labels l JOIN nodes n ON n.id=l.node WHERE l.ref=? AND n.tag=?',
+                                      (ref,self.tags.get('component',-1))).fetchall() if ref else []
+            npc = matches[0][0] if len(matches)==1 and self.attrs(matches[0][0]).get('class')=='npc' else None
+            boards = self.children(npc,'blackboard') if npc else []
+            board = boards[0] if len(boards)==1 else None
+            values = self.children(board,'value')
+            experience = {}
+            nodes = {}
+            reason = ''
+            if refs.count(ref)!=1 or not npc or not board:
+                reason = '特工引用或黑板无法唯一识别'
+            for skill,name in DIPLOMACY_EXPERIENCE.items():
+                matches = [n for n in values if self.attrs(n).get('name')==name]
+                if len(matches)>1 or (matches and self.attrs(matches[0]).get('type')!='integer'):
+                    reason = '经验值记录不唯一或类型异常'
+                node = matches[0] if len(matches)==1 else None
+                nodes[skill] = node
+                experience[skill] = int(self.attrs(node).get('value',0)) if node else 0
+            attrs = self.attrs(npc) if npc else {}
+            agents.append({'id':npc or entry,'entry':entry,'faction':self.attrs(entry).get('faction',''),
+                           'name':self.game.translate(attrs.get('name','')) if attrs.get('name') else f'特工 #{entry}',
+                           'experience':experience,'levels':{k:agent_level(v) for k,v in experience.items()},
+                           'nodes':nodes,'board':board,'editable':not reason,'reason':reason})
+        return agents
+
+    def diplomacy_data(self, request):
+        factions = self.diplomacy_factions()
+        allowed = {r['id'] for r in factions}
+        preferred = [r['id'] for r in factions if not r['locked'] and not r['notSelectable']]
+        source = request.get('source') if request.get('source') in allowed else next(iter(preferred),factions[0]['id'] if factions else None)
+        target = request.get('target') if request.get('target') in allowed and request.get('target')!=source else next((identity for identity in preferred if identity!=source),next((r['id'] for r in factions if r['id']!=source),None))
+        return {'available':bool(self.diplomacy_node),'influence':int(self.attrs(self.diplomacy_node).get('influence',0)) if self.diplomacy_node else None,
+                'influenceNode':self.diplomacy_node,'factions':factions,
+                'pair':self.diplomacy_pair(source,target) if source and target else None,
+                'agents':self.diplomacy_agents() if self.diplomacy_node else [],
+                'levelMinimums':list(AGENT_LEVEL_MINIMUM),'influenceEditMax':INFLUENCE_EDIT_MAX,
+                'experienceEditMax':AGENT_EXPERIENCE_EDIT_MAX}
 
     def cargo(self,ship):
         if ship not in self.ships:
@@ -417,6 +499,8 @@ class Editor:
                     'sectors':sorted({r['sector']['id']:r['sector'] for r in ({'sector':self.sector(n)} for n in self.station_accounts)}.values(),key=lambda s:s['name'])}
         if kind == 'station_resources':
             return self.station_resources(request)
+        if kind == 'diplomacy':
+            return self.diplomacy_data(request)
         if kind == 'relations':
             rows = self.relation_rows()
             hidden = sum(r['id'].lower().startswith('visitor') for r in rows)
@@ -492,6 +576,49 @@ class Editor:
                 amount = integer(c['value'],0,999999999999999)
                 plan.set(account['node'],amount=amount)
                 plan.summaries.append(f'{self.asset_name(station)} / 建造资金 → {amount:,} Cr')
+            elif kind == 'influence':
+                if not self.diplomacy_node:
+                    raise ValueError('存档未启用外交系统')
+                amount = integer(c['value'],0,INFLUENCE_EDIT_MAX)
+                plan.set(self.diplomacy_node,influence=amount)
+                plan.summaries.append(f'外交影响力 → {amount:,}')
+            elif kind == 'agent_exp':
+                npc = integer(c['id'],1,2**63-1)
+                skill = c.get('storage')
+                agent = next((a for a in self.diplomacy_agents() if a['id']==npc and a['editable']),None)
+                if not agent or skill not in DIPLOMACY_EXPERIENCE:
+                    raise ValueError('特工或经验类型无法唯一识别')
+                amount = integer(c['value'],0,AGENT_EXPERIENCE_EDIT_MAX)
+                node = agent['nodes'][skill]
+                if node:
+                    plan.set(node,value=amount)
+                else:
+                    plan.add(agent['board'],element('value',{'name':DIPLOMACY_EXPERIENCE[skill],'type':'integer','value':amount}))
+                plan.summaries.append(f'{agent["name"]} / {skill} 经验 → {amount:,}（等级 {agent_level(amount)}）')
+            elif kind == 'npc_relation':
+                source,target = str(c['id']),str(c['storage'])
+                permitted = {r['id'] for r in self.diplomacy_factions()}
+                if source not in permitted or target not in permitted or source==target:
+                    raise ValueError('请选择两个不同的可见势力')
+                pair = self.diplomacy_pair(source,target)
+                if not pair['editable']:
+                    raise ValueError('势力关系被锁定或记录不唯一')
+                value = float(c['value'])
+                if not math.isfinite(value) or not -1<=value<=1:
+                    raise ValueError('关系值必须在 -1 到 1 之间')
+                for a,b in ((source,target),(target,source)):
+                    parent = self.first(self.factions[a],'relations')
+                    nodes = [n for n in self.children(parent,'relation') if self.attrs(n).get('faction')==b]
+                    if nodes:
+                        plan.set(nodes[0],relation=value)
+                    elif parent:
+                        plan.add(parent,element('relation',{'faction':b,'relation':value}))
+                    else:
+                        missing_relations.setdefault(self.factions[a],[]).append(element('relation',{'faction':b,'relation':value}))
+                    for n in self.children(parent,'booster'):
+                        if self.attrs(n).get('faction')==b:
+                            plan.set(n,relation=0)
+                plan.summaries.append(f'{self.game.name(source)} ↔ {self.game.name(target)} → {value}')
             elif kind in ('station_stock','build_stock'):
                 station = integer(c['id'],1,2**63-1)
                 wid = str(c['storage'])

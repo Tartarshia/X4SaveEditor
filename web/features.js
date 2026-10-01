@@ -6,9 +6,10 @@ let selectedSector='', shipSearch='';
 let includeInternalFactions=false;
 let stationSearch='', stationSector='', stationPage=0;
 let resourceStation='';
+let diplomacySource='', diplomacyTarget='';
 let gamePathValue='';
 try { gamePathValue=localStorage.getItem('x4-game-path')||''; } catch {}
-const titles={money:'玩家金钱',station_resources:'空间站资源',relations:'势力关系',cargo:'飞船货仓',blueprints:'解锁蓝图',crew:'船员技能'};
+const titles={money:'玩家金钱',station_resources:'空间站资源',relations:'势力关系',diplomacy:'外交与特工',cargo:'飞船货仓',blueprints:'解锁蓝图',crew:'船员技能'};
 const skillNames={all:'全部五项技能',piloting:'驾驶',management:'管理',engineering:'工程',boarding:'登舰',morale:'士气'};
 const groups={ships:'舰船',engines:'引擎',shields:'护盾',weapons:'武器',turrets:'炮塔',missiles:'导弹',drones:'无人机',countermeasures:'干扰弹',deployables:'部署物',modules:'空间站模块'};
 function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
@@ -107,6 +108,7 @@ async function renderFeature(){
   }
   if(feature==='cargo'){await renderCargo(parent);return;}
   if(feature==='station_resources'){await renderStationResources(parent);return;}
+  if(feature==='diplomacy'){await renderDiplomacy(parent);return;}
   const bar=searchBar(parent);
   if(feature==='crew')shipPicker(bar,true);
   if(feature==='blueprints'){
@@ -161,6 +163,68 @@ async function renderFeature(){
     t.body.append(tr);
   }
   parent.append(t.wrap);if(!data.rows.length)parent.append(el('p','没有匹配项目。可以调整搜索条件或检查游戏资源目录。','empty'));pages(parent,data);
+}
+async function renderDiplomacy(parent){
+  const data=await job('gameplay',{kind:'diplomacy',source:diplomacySource,target:diplomacyTarget,gamePath:gamePathValue});
+  const card=(title,description)=>{const section=el('section',undefined,'diplomacy-card');section.append(el('h3',title),el('p',description,'muted'));parent.append(section);return section;};
+  const influence=card('外交影响力',`玩家当前可用的外交影响力。最高显示档位从 33 开始；游戏余额的绝对上限未确认。编辑器允许写入 0–${data.influenceEditMax}，这是保守限制。`);
+  if(data.available){
+    const make=value=>({kind:'influence',value,original:data.influence,label:'外交影响力'});
+    const input=bindDraft(numberInput(currentValue(make(data.influence)),0,data.influenceEditMax),make);
+    input.setAttribute('aria-label','外交影响力目标值');
+    influence.append(el('p',`当前：${fmt(data.influence)}`,'diplomacy-current'),input);
+  }else influence.append(el('p','此存档没有玩家外交记录，暂不能修改影响力或特工。','hint'));
+
+  const section=card('势力之间的关系','选择两个非玩家势力，设置双方的基础关系值。此操作会把这对势力现有的临时关系加成归零。');
+  const pair=data.pair;
+  if(pair){diplomacySource=pair.source;diplomacyTarget=pair.target;}
+  const bar=el('div',undefined,'feature-toolbar');
+  const picker=(label,value)=>{
+    const select=el('select');select.setAttribute('aria-label',label);select.dataset.work='';
+    for(const faction of data.factions){const option=el('option',`${faction.name} [${faction.id}]${faction.locked?' · 关系锁定':''}${faction.notSelectable?' · 不参与外交':''}`);option.value=faction.id;select.append(option);}
+    select.value=value||'';return select;
+  };
+  const source=picker('势力 A',diplomacySource),target=picker('势力 B',diplomacyTarget);
+  source.onchange=work(async()=>{diplomacySource=source.value;diplomacyTarget=target.value;await renderFeature();});
+  target.onchange=work(async()=>{diplomacySource=source.value;diplomacyTarget=target.value;await renderFeature();});
+  bar.append(source,el('span','↔'),target);section.append(bar);
+  if(pair){
+    const show=side=>`${side.base===null?'存档未单独保存（游戏默认）':side.base.toFixed(6)}${side.temporary?`；临时加成 ${side.temporary.toFixed(6)}`:''}`;
+    section.append(el('p',`${pair.source} → ${pair.target}：${show(pair.forward)}`,'diplomacy-current'),el('p',`${pair.target} → ${pair.source}：${show(pair.reverse)}`,'diplomacy-current'));
+    const ids=[pair.source,pair.target].sort();
+    const first=data.factions.find(f=>f.id===ids[0]),second=data.factions.find(f=>f.id===ids[1]);
+    const make=value=>({kind:'npc_relation',id:ids[0],storage:ids[1],value,
+      original:`${pair.forward.base??'默认'} / ${pair.reverse.base??'默认'}`,label:`势力关系：${first.name} ↔ ${second.name}`});
+    const key=commandKey(make(''));
+    const input=numberInput(drafts.get(key)?.value??commands.get(key)?.value??'',-1,1);input.step='0.01';
+    input.placeholder='输入 -1 至 1';input.setAttribute('aria-label','势力间目标关系');input.disabled=!pair.editable;
+    input.oninput=()=>{if(input.value===''){drafts.delete(key);updateDraftCount();}else queueDraft(make(input.value));};
+    const control=el('label','目标基础关系（双方）');control.append(input);section.append(control);
+    if(!pair.editable)section.append(el('p','这对势力的关系被游戏锁定或存档记录不唯一，只读。','hint'));
+    else section.append(el('p','剧情和动态外交事件仍可能在游戏中重新调整关系。','muted'));
+  }else section.append(el('p','没有足够的可见势力。','empty'));
+
+  const agents=card(`特工 · ${data.agents.length} 人`,`谈判与谍报是两套独立经验。每项到 200 经验即为最高的 5 级，游戏内经验仍可继续累计；编辑器写入上限为每项 ${data.experienceEditMax}。选择等级会把经验设为该等级的最低值。`);
+  if(!data.available)return;
+  if(!data.agents.length){agents.append(el('p','当前没有登记特工。','empty'));return;}
+  const t=table(['特工 / 势力','谈判经验与等级','谍报经验与等级']);
+  for(const agent of data.agents){
+    const tr=el('tr');cell(tr,`${agent.name}\n${agent.faction} · #${agent.id}`).className='named-cell';
+    for(const [skill,label] of [['negotiation','谈判'],['espionage','谍报']]){
+      const box=el('div',undefined,'agent-exp');
+      const make=value=>({kind:'agent_exp',id:agent.id,storage:skill,value,original:agent.experience[skill],label:`${agent.name} / ${label}经验`});
+      const xp=bindDraft(numberInput(currentValue(make(agent.experience[skill])),0,data.experienceEditMax),make);
+      xp.setAttribute('aria-label',`${agent.id} ${label}经验`);xp.disabled=!agent.editable;
+      const level=el('select');level.setAttribute('aria-label',`${agent.id} ${label}等级`);level.disabled=!agent.editable;
+      for(let n=0;n<data.levelMinimums.length;n++){const option=el('option',`${n} 级（${data.levelMinimums[n]} 经验起）`);option.value=n;level.append(option);}
+      const sync=()=>{const value=Number(xp.value);level.value=String(data.levelMinimums.reduce((result,minimum,i)=>value>=minimum?i:result,0));};
+      xp.addEventListener('input',sync);level.onchange=()=>{xp.value=String(data.levelMinimums[Number(level.value)]);xp.dispatchEvent(new Event('input'));};sync();
+      box.append(xp,level);cell(tr,'').append(box);
+    }
+    if(!agent.editable){tr.title=agent.reason;tr.classList.add('readonly');}
+    t.body.append(tr);
+  }
+  agents.append(t.wrap);
 }
 async function renderStationMoney(parent){
   const section=el('section',undefined,'station-money');

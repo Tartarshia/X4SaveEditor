@@ -33,3 +33,7 @@
 ## 空间站资源数据边界
 
 [Egosoft 的空间站建造与管理指南](https://wiki.egosoft.com/X4%20Foundations%20Wiki/Manual%20and%20Guides/X4%3A%20Foundations%20Manual/Station%20Building%20And%20Management/?language=en)区分生产模块、按物资分配的仓储空间，以及经理管理的自动仓储配额。修改器从存档的 `station` 与独立 `buildstorage` 组件分别读取实体 `storage/cargo/ware` 库存；交易预留及资源缺口是另外的状态记录，不计入库存。单件体积、运输类型和实体货仓容量只从用户本机游戏资源读取。总量修改会保留无关 XML 字节并校验合并后的货仓容量，但不会重算经理配额、交易订单或生产流程。
+
+## 外交与特工数据边界
+
+[Egosoft 8.00 更新说明](https://www.egosoft.com/news/archive/2025September_en.php)将 Diplomacy 列为免费基础游戏更新，Envoy Pack 是同期推出的 DLC；[开发说明](https://m.egosoft.com/news/archive/2025July_en.php)提到势力外交及谈判、谍报特工。实现依据本机 9.00 游戏脚本与存档核对字段，不复制或分发游戏资源。玩家的 `diplomacy` 节点保存 `influence` 与已登记特工的组件引用；对应 NPC 的黑板分别保存 `$diplomacy_exp_negotiation` 和 `$diplomacy_exp_espionage`。本机脚本按经验 0、10、20、50、100、200 的门槛计算 0–5 级，存档没有独立等级字段；经验在 200 后仍可累积，未查到硬上限。影响力的最高显示档位从 33 起，本机脚本存在单次授予 300 的调试操作，但没有找到余额的绝对上限。因此编辑器人为限制影响力写入 300、单项经验写入 200，防止无意义的巨大值；这些不是游戏数据类型的硬上限。势力对的基础值保存在双方各自的 `faction/relations/relation`；本工具设置两向相同值并清除这对势力的 `booster`，不修改玩家声望或外交事件状态。缺失的基础值仍按“游戏默认”显示，锁定及歧义记录不写入。游戏中的动态事件可再次改变这些值。
