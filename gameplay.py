@@ -29,6 +29,15 @@ def agent_level(experience):
     return max(i for i,minimum in enumerate(AGENT_LEVEL_MINIMUM) if experience >= minimum)
 
 
+def inventory_group(wid, ware):
+    tags = set(ware.get('tags','').split())
+    if 'paintmod' in tags or wid.startswith('paintmod_'):
+        return 'paint'
+    if tags.intersection({'equipmentmod','equipmentmodpart'}) or wid.startswith(('mod_','modpart_')):
+        return 'mod'
+    return 'other'
+
+
 class Editor:
     def __init__(self, folder, game_path=None, progress=lambda m: None, catalog=None):
         self.folder = Path(folder)
@@ -111,6 +120,31 @@ class Editor:
         for n, in self.db.execute("SELECT n.id FROM nodes n JOIN labels l ON l.node=n.id WHERE n.tag=? AND l.label LIKE '%class=npc%' AND l.label LIKE '%owner=player%'", (self.tags.get('component',-1),)).fetchall():
             if self.attrs(n).get('class') == 'npc' and self.attrs(n).get('owner') == 'player':
                 self.add_crew(n, self.asset(n), anonymous=False)
+        self.inventory_locations = {self.player:{'id':self.player,'inventory':self.first(self.player,'inventory'),
+                                                  'name':'玩家随身物品','type':'player','asset':None,'sector':None}}
+        # Inventory nodes are few compared with the full save. Discover the
+        # actual containers, including future ship/station variants, by index.
+        for inventory, holder in self.db.execute('SELECT id,parent FROM nodes WHERE tag=?',(self.tags.get('inventory',-1),)):
+            if holder == self.player:
+                continue
+            asset = self.asset(holder)
+            if asset not in self.assets:
+                continue
+            attrs = self.attrs(holder)
+            cls = attrs.get('class','')
+            if cls == 'npc':
+                if attrs.get('owner') != 'player':
+                    continue
+                name = self.crew.get(holder,{}).get('name') or attrs.get('name') or '玩家船员'
+                kind = 'crew'
+            elif holder == asset or cls in ('storage','container'):
+                name = self.asset_name(asset)
+                kind = 'ship' if asset in self.ships else 'station'
+            else:
+                continue
+            self.inventory_locations[holder] = {'id':holder,'inventory':inventory,'name':name,'type':kind,
+                'asset':asset,'ship':self.ship_description(asset) if asset in self.ships else self.asset_name(asset),
+                'sector':self.sector(holder)}
 
     def close(self):
         self.db.close()
@@ -484,6 +518,29 @@ class Editor:
         for wid,target in updates.items():
             plan.summaries.append(f'{self.asset_name(station)} / {label} / {self.game.name(wid)} → {target:,}')
 
+    def inventory_data(self, request):
+        locations = list(self.inventory_locations.values())
+        selected = int(request.get('holder') or self.player)
+        if selected not in self.inventory_locations:
+            raise ValueError('请选择已识别的玩家物品位置')
+        inventory = self.inventory_locations[selected]['inventory']
+        items = []
+        for node in self.children(inventory,'ware'):
+            attrs = self.attrs(node)
+            wid = attrs.get('ware','')
+            ware = self.game.wares.get(wid,{})
+            if ware.get('transport') != 'inventory':
+                continue
+            items.append({'id':wid,'name':self.game.name(wid),'amount':int(attrs.get('amount',1)),
+                          'node':node,'tags':ware.get('tags',''),'group':inventory_group(wid,ware),
+                          'editable':not set(ware.get('tags','').split()).intersection({'deprecated','missiononly'})})
+        items.sort(key=lambda row:(row['name'],row['id']))
+        return {'locations':locations,'holder':selected,'items':items,
+                'wares':[{'id':wid,'name':ware['name'],'tags':ware.get('tags',''),
+                          'group':inventory_group(wid,ware)}
+                         for wid,ware in self.game.wares.items() if ware.get('transport')=='inventory'
+                         and not set(ware.get('tags','').split()).intersection({'deprecated','missiononly'})]}
+
     def view(self, request):
         page = max(0,int(request.get('page',0)))
         query = str(request.get('search','')).lower()
@@ -514,6 +571,8 @@ class Editor:
                     'sectors':sorted({r['sector']['id']:r['sector'] for r in ({'sector':self.sector(n)} for n in self.station_accounts)}.values(),key=lambda s:s['name'])}
         if kind == 'station_resources':
             return self.station_resources(request)
+        if kind == 'inventory':
+            return self.inventory_data(request)
         if kind == 'diplomacy':
             return self.diplomacy_data(request)
         if kind == 'relations':
@@ -563,6 +622,7 @@ class Editor:
         new_blueprints = []
         cargo_changes = {}
         stock_changes = {}
+        inventory_changes = {}
         missing_relations = {}
         for c in unique.values():
             kind = c.get('kind')
@@ -639,6 +699,15 @@ class Editor:
                 station = integer(c['id'],1,2**63-1)
                 wid = str(c['storage'])
                 stock_changes.setdefault((station,kind=='build_stock'),{})[wid] = integer(c['value'],0,2147483647)
+            elif kind == 'inventory':
+                holder = integer(c['storage'],1,2**63-1)
+                if holder not in self.inventory_locations:
+                    raise ValueError('物品位置不是已识别的玩家物品位置')
+                wid = str(c['id'])
+                ware = self.game.wares.get(wid,{})
+                if ware.get('transport') != 'inventory' or set(ware.get('tags','').split()).intersection({'deprecated','missiononly'}):
+                    raise ValueError('不是本机已识别的可编辑随身物品：' + wid)
+                inventory_changes.setdefault(holder,{})[wid] = integer(c['value'],0,2147483647)
             elif kind == 'relation':
                 identity = c['id']
                 if identity not in self.factions or identity == 'player' or 'player' not in self.factions:
@@ -743,6 +812,28 @@ class Editor:
                 plan.add(data['cargo'] or storage,xml if data['cargo'] else element('cargo',children=xml))
         for (station,build),updates in stock_changes.items():
             self.plan_station_stock(plan,station,build,updates)
+        for holder, updates in inventory_changes.items():
+            inventory = self.inventory_locations[holder]['inventory']
+            if len(self.children(holder,'inventory')) != (1 if inventory else 0):
+                raise ValueError('同一位置存在多个物品容器，暂不支持修改')
+            current = {}
+            for node in self.children(inventory,'ware'):
+                wid = self.attrs(node).get('ware')
+                if wid in updates:
+                    if wid in current:
+                        raise ValueError('同一持有人存在重复物品记录，暂不支持修改')
+                    current[wid] = node
+            additions = []
+            for wid,amount in updates.items():
+                if wid in current:
+                    if amount:plan.set(current[wid],amount=amount)
+                    else:plan.remove_leaf(current[wid])
+                elif amount:
+                    additions.append(element('ware',{'ware':wid,'amount':amount}))
+                plan.summaries.append(f'{self.inventory_locations[holder]["name"]} / {self.game.name(wid)} → {amount:,}')
+            if additions:
+                xml = ''.join(additions)
+                plan.add(inventory or holder,xml if inventory else element('inventory',children=xml))
         return plan
 
 

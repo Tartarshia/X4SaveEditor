@@ -6,10 +6,12 @@ let selectedSector='', shipSearch='';
 let includeInternalFactions=false;
 let stationSearch='', stationSector='', stationPage=0;
 let resourceStation='';
+let inventoryHolder='';
+let inventoryGroup='other';
 let diplomacySource='', diplomacyTarget='';
 let gamePathValue='';
 try { gamePathValue=localStorage.getItem('x4-game-path')||''; } catch {}
-const titles={money:'玩家金钱',station_resources:'空间站资源',relations:'势力关系',diplomacy:'外交与特工',cargo:'飞船货仓',blueprints:'解锁蓝图',crew:'船员技能'};
+const titles={money:'玩家金钱',station_resources:'空间站资源',relations:'势力关系',diplomacy:'外交与特工',cargo:'飞船货仓',inventory:'特殊物品',blueprints:'解锁蓝图',crew:'船员技能'};
 const skillNames={all:'全部五项技能',piloting:'驾驶',management:'管理',engineering:'工程',boarding:'登舰',morale:'士气'};
 const groups={ships:'舰船',engines:'引擎',shields:'护盾',weapons:'武器',turrets:'炮塔',missiles:'导弹',drones:'无人机',countermeasures:'干扰弹',deployables:'部署物',modules:'空间站模块'};
 function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
@@ -108,6 +110,7 @@ async function renderFeature(){
     await renderStationMoney(parent);return;
   }
   if(feature==='cargo'){await renderCargo(parent);return;}
+  if(feature==='inventory'){await renderInventory(parent);return;}
   if(feature==='station_resources'){await renderStationResources(parent);return;}
   if(feature==='diplomacy'){await renderDiplomacy(parent);return;}
   const bar=searchBar(parent);
@@ -378,6 +381,60 @@ async function renderCargo(parent){
   if(!data.storages.length)parent.append(el('p','未找到这艘船的货物仓储组件。弹药和个人背包不属于货仓。','hint'));
 }
 document.querySelectorAll('[data-tab]').forEach(b=>{b.dataset.work='';b.onclick=work(async()=>{feature=b.dataset.tab;featurePage=0;featureSearch='';await renderFeature();});});
+async function renderInventory(parent){
+  const data=await job('gameplay',{kind:'inventory',holder:inventoryHolder,gamePath:gamePathValue});
+  inventoryHolder=String(data.holder);
+  parent.append(el('p','管理玩家随身物品、已记录的玩家船员背包，以及存档中有独立 inventory 节点的玩家飞船和空间站。按分类查看物品；“删除”会将该位置的数量设为 0，统一暂存后仍可在修改清单撤销。','muted'));
+  const bar=el('div',undefined,'feature-toolbar');
+  const holderSearch=el('input');holderSearch.placeholder='筛选持有人 / 飞船 / 星区';holderSearch.setAttribute('aria-label','筛选物品持有人');
+  const picker=el('select');picker.setAttribute('aria-label','选择物品持有人');picker.dataset.work='';
+  const label=l=>l.type==='player'?l.name:`${l.type==='crew'?'船员':l.type==='station'?'空间站':'飞船'} · ${l.name} · ${l.ship||''} · ${l.sector?.name||''} [${l.id}]`;
+  const fillHolders=()=>{picker.replaceChildren();const q=holderSearch.value.trim().toLowerCase();
+    const groups=new Map();for(const location of data.locations){const name=label(location);if(String(location.id)!==inventoryHolder&&!name.toLowerCase().includes(q))continue;
+      const type=location.type;let group=groups.get(type);if(!group){group=el('optgroup');group.label={player:'玩家',ship:'飞船',station:'空间站',crew:'船员背包'}[type]||type;groups.set(type,group);picker.append(group);}
+      const option=el('option',name);option.value=location.id;group.append(option);}
+    picker.value=inventoryHolder;};
+  holderSearch.oninput=fillHolders;picker.onchange=work(async()=>{inventoryHolder=picker.value;await renderFeature();});fillHolders();bar.append(holderSearch,picker);parent.append(bar);
+  const location=data.locations.find(l=>String(l.id)===inventoryHolder);
+  parent.append(el('h3',`${location?.name||'玩家'} · ${data.items.length} 种物品`));
+  const items=new Map(data.items.map(item=>[item.id,{...item}]));
+  for(const c of [...commands.values(),...drafts.values()])if(c.kind==='inventory'&&String(c.storage)===inventoryHolder&&!items.has(c.id)){
+    const ware=data.wares.find(w=>w.id===c.id);items.set(c.id,{id:c.id,name:ware?.name||c.id,amount:0,group:ware?.group||'other'});}
+  const groups=[['other','其他物品'],['paint','喷漆 Paint MOD'],['mod','改装 MOD / 材料']];
+  const tabs=el('div',undefined,'feature-toolbar inventory-groups');
+  for(const [group,title] of groups){const count=[...items.values()].filter(item=>item.group===group).length;
+    const pick=button(`${title} (${count})`,async()=>{inventoryGroup=group;await renderFeature();},group===inventoryGroup?'active':'');
+    pick.setAttribute('aria-pressed',String(group===inventoryGroup));tabs.append(pick);}
+  parent.append(tabs);
+  const filter=el('input');filter.placeholder='筛选已有物品名称 / ID';filter.setAttribute('aria-label','筛选已有特殊物品');parent.append(filter);
+  const t=table(['物品 / ID','当前数量','目标数量','操作']);
+  const visibleItems=[...items.values()].filter(item=>item.group===inventoryGroup).sort((a,b)=>a.name.localeCompare(b.name)||a.id.localeCompare(b.id));
+  for(const item of visibleItems){
+    const tr=el('tr');const make=value=>({kind:'inventory',id:item.id,storage:Number(inventoryHolder),value,original:item.amount,
+      label:`${location?.name||'玩家'} / ${item.name} [${item.id}]`});
+    cell(tr,`${item.name}\n${item.id}${item.editable===false?' · 剧情或弃用物品，只读':''}`).className='named-cell';cell(tr,fmt(item.amount));
+    const input=bindDraft(numberInput(currentValue(make(item.amount)),0,2147483647),make);input.setAttribute('aria-label',`${item.id} 目标数量`);input.disabled=item.editable===false;cell(tr,'').append(input);
+    const key=commandKey(make(item.amount)),draft=drafts.get(key),staged=commands.get(key);
+    const actions=cell(tr,'');
+    if(item.editable!==false&&Number(item.amount)>0){
+      if(draft&&Number(draft.value)===0)actions.append(button('取消删除',async()=>{drafts.delete(key);updateDraftCount();await renderFeature();}));
+      else if(staged&&Number(staged.value)===0&&!draft){const marked=el('span','已暂存删除 · 可在修改清单撤销','muted');actions.append(marked);}
+      else actions.append(button('删除',async()=>{queueDraft(make(0));await renderFeature();},'inventory-delete'));
+    }
+    if(staged||draft)tr.classList.add('pending');t.body.append(tr);
+  }
+  filter.oninput=()=>{const q=filter.value.trim().toLowerCase();for(const tr of t.body.rows)tr.hidden=!tr.cells[0].textContent.toLowerCase().includes(q);};
+  parent.append(t.wrap);if(!visibleItems.length)parent.append(el('p','这一组目前没有物品，可在下方添加。','muted'));
+  const add=el('div',undefined,'feature-toolbar');const search=el('input');search.placeholder='搜索可添加特殊物品';search.setAttribute('aria-label','搜索可添加特殊物品');
+  const ware=el('select');ware.setAttribute('aria-label','选择特殊物品');ware.dataset.work='';
+  const fillWares=()=>{ware.replaceChildren();const q=search.value.trim().toLowerCase();for(const item of data.wares){
+    if(item.group!==inventoryGroup)continue;
+    if(!(item.name+' '+item.id).toLowerCase().includes(q))continue;const option=el('option',`${item.name} [${item.id}]`);option.value=item.id;ware.append(option);}};
+  search.oninput=fillWares;fillWares();const amount=numberInput(1,0,2147483647);amount.setAttribute('aria-label','特殊物品目标数量');
+  add.append(search,ware,amount,button('加入待修改物品',async()=>{if(!ware.value)throw new Error('请选择物品');const item=data.wares.find(w=>w.id===ware.value);
+    queueDraft({kind:'inventory',id:ware.value,storage:Number(inventoryHolder),value:amount.value,original:items.get(ware.value)?.amount??0,
+      label:`${location?.name||'玩家'} / ${item?.name||ware.value} [${ware.value}]`});await renderFeature();}));parent.append(add);
+}
 $('stageAll').onclick=work(stagePending);
 $('gameSettings').onclick=()=>$('gameSettingsDialog').showModal();
 $('loadGameData').onclick=work(async()=>{gamePathValue=$('gamePath').value.trim().replace(/^"|"$/g,'');try{localStorage.setItem('x4-game-path',gamePathValue);}catch{}$('gameSettingsDialog').close();if(revision)await loadGameplay();});

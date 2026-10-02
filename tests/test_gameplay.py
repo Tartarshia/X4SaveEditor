@@ -36,6 +36,15 @@ DIPLOMACY_SAVE = (SAVE.replace('<component class="player" owner="player" lastcon
     '<component class="npc" owner="player" name="Captain" id="agent-npc"><blackboard><value name="$diplomacy_exp_negotiation" type="integer" value="19"/><value name="$diplomacy_exp_espionage" type="integer" value="49"/></blackboard><traits>'))
 
 
+INVENTORY_SAVE = (SAVE.replace('<component class="player" owner="player" lastcontrolled="ship"><blueprints>',
+                          '<component class="player" owner="player" lastcontrolled="ship"><inventory><ware ware="inv_training" amount="2"/><ware ware="paintmod_test" amount="4"/><ware ware="mod_engine_test" amount="1"/></inventory><blueprints>')
+                 .replace('<component class="ship_s" id="ship" owner="player" name="Test ship">',
+                          '<component class="ship_s" id="ship" owner="player" name="Test ship"><inventory><ware ware="inv_setapart"/></inventory>')
+                 .replace('<component class="npc" owner="player" name="Captain"><traits>',
+                          '<component class="npc" owner="player" name="Captain"><inventory><ware ware="inv_training" amount="3"/></inventory><traits>')
+                 .replace('<component class="station" owner="player" name="Factory A" code="ST-A">',
+                          '<component class="station" owner="player" name="Factory A" code="ST-A"><inventory><ware ware="inv_setapart" amount="4"/></inventory>'))
+
 SECTOR_SAVE = '''<savegame><info><player money="42"/></info><universe>
 <component class="player" owner="player" lastcontrolled="docked"/>
 <component class="sector" macro="sector_a"><connections><connection><component class="zone">
@@ -61,6 +70,12 @@ def make_game(root):
 <ware id="ice" name="{1,2}" transport="solid" volume="5"/>
 <ware id="energycells" name="Energy" transport="container" volume="1"/>
 <ware id="module_test_observation" name="Observation deck" transport="container" volume="1" tags="module"/>
+<ware id="inv_training" name="Training Material" transport="inventory" tags="inventory seminar"/>
+<ware id="inv_setapart" name="SETA Part" transport="inventory" tags="inventory crafting"/>
+<ware id="inv_mission" name="Mission Item" transport="inventory" tags="inventory missiononly"/>
+<ware id="paintmod_test" name="Paint" transport="inventory" tags="inventory paintmod"/>
+<ware id="mod_engine_test" name="Engine MOD" transport="inventory" tags="crafting equipmentmod"/>
+<ware id="modpart_engine_test" name="MOD Part" transport="inventory" tags="crafting equipmentmodpart inventory"/>
 <ware id="old_engine" name="Old" transport="equipment" group="engines"><production/></ware>
 <ware id="new_engine" name="{1,3}" transport="equipment" group="engines"><production/></ware>
 <ware id="blocked" name="Blocked" transport="equipment" tags="noplayerblueprint"><production/></ware>
@@ -165,6 +180,47 @@ class GameplayTests(unittest.TestCase):
         storage=e.cargo(ship)[0]
         tree=self.export([{'kind':'cargo','ship':ship,'storage':storage['id'],'id':'ice','value':'1'}])
         self.assertEqual(tree.find('.//component[@id="empty"]//cargo/ware').get('amount'),'1')
+
+    def test_special_inventory_across_player_ship_station_and_crew(self):
+        source=self.root/'inventory.xml'
+        raw=INVENTORY_SAVE
+        source.write_text(raw,'utf-8')
+        folder,_=core.build_index(source,self.root/'cache')
+        editor=Editor(folder,self.root/'game')
+        try:
+            player=editor.player
+            locations=editor.view({'kind':'inventory'})['locations']
+            self.assertEqual({r['type'] for r in locations},{'player','ship','station','crew'})
+            holders={r['type']:r['id'] for r in locations}
+            data=editor.view({'kind':'inventory'})
+            items={row['id']:row for row in data['items']}
+            wares={row['id']:row for row in data['wares']}
+            self.assertEqual(items['inv_training']['amount'],2)
+            self.assertEqual({wid:items[wid]['group'] for wid in ('inv_training','paintmod_test','mod_engine_test')},
+                             {'inv_training':'other','paintmod_test':'paint','mod_engine_test':'mod'})
+            self.assertEqual(wares['modpart_engine_test']['group'],'mod')
+            self.assertNotIn('inv_mission',wares)
+            commands=[{'kind':'inventory','storage':player,'id':'inv_training','value':5},
+                      {'kind':'inventory','storage':player,'id':'paintmod_test','value':0},
+                      {'kind':'inventory','storage':holders['ship'],'id':'inv_setapart','value':0},
+                      {'kind':'inventory','storage':holders['station'],'id':'inv_training','value':7},
+                      {'kind':'inventory','storage':holders['crew'],'id':'inv_training','value':9}]
+            dest=self.root/'inventory-export.xml.gz'
+            editor.plan(commands).export({},dest,lambda m:None)
+            with gzip.open(dest,'rt',encoding='utf-8') as f:tree=ET.fromstring(f.read())
+            self.assertEqual(tree.find('.//component[@class="player"]/inventory/ware').get('amount'),'5')
+            self.assertIsNone(tree.find('.//component[@class="player"]/inventory/ware[@ware="paintmod_test"]'))
+            self.assertEqual(tree.find('.//component[@class="player"]/inventory/ware[@ware="mod_engine_test"]').get('amount'),'1')
+            self.assertIsNone(tree.find('.//component[@id="ship"]/inventory/ware'))
+            self.assertEqual(tree.find('.//component[@name="Factory A"]/inventory/ware[@ware="inv_training"]').get('amount'),'7')
+            self.assertEqual(tree.find('.//component[@name="Captain"]/inventory/ware').get('amount'),'9')
+            self.assertEqual(source.read_text('utf-8'),raw)
+            for bad in ({'kind':'inventory','storage':player,'id':'ore','value':1},
+                        {'kind':'inventory','storage':player,'id':'inv_mission','value':1},
+                        {'kind':'inventory','storage':999999,'id':'inv_training','value':1},
+                        {'kind':'inventory','storage':player,'id':'inv_training','value':2147483648}):
+                with self.subTest(bad=bad),self.assertRaises(ValueError):editor.plan([bad]).compile()
+        finally:editor.close()
 
     def test_validation_and_aggregate_capacity(self):
         e=self.editor
