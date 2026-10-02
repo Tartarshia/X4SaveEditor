@@ -15,6 +15,8 @@ class Plan:
         self.attrs = {}
         self.children = {}
         self.removed = set()
+        self.unset_attrs = {}
+        self.removed_trees = {}
         self.summaries = []
 
     def set(self, node, **values):
@@ -26,17 +28,34 @@ class Plan:
     def remove_leaf(self, node):
         self.removed.add(node)
 
+    def unset(self, node, *keys):
+        self.unset_attrs.setdefault(node,set()).update(keys)
+
+    def remove_branch(self,node,allowed):
+        # Used only for anonymous personnel with no externally referencable IDs.
+        with core.connect(self.folder) as db:
+            rows=db.execute('WITH RECURSIVE branch(id) AS (SELECT ? UNION ALL SELECT n.id FROM nodes n JOIN branch b ON n.parent=b.id) SELECT n.id,t.name FROM branch b JOIN nodes n ON n.id=b.id JOIN tags t ON t.id=n.tag LIMIT 1001',(node,)).fetchall()
+        if len(rows)>1000 or any(tag not in allowed for _,tag in rows):raise ValueError('人员记录含未知结构，不能删除')
+        for child,tag in rows:
+            attrs=core.attributes(core.start_tag(self.folder,child)[1])
+            if set(attrs)&{'id','component','object','ref','reference'}:raise ValueError('人员记录有引用，不支持删除')
+        offset,raw=core.bounded_element(self.folder,node)
+        self.removed_trees[node]=(offset,raw,len(rows))
+
     def compile(self, advanced=None):
         attrs = {n: dict(v) for n, v in self.attrs.items()}
         for n, values in (advanced or {}).items():
             n = int(n)
-            if n in attrs or n in self.children or n in self.removed:
+            if n in attrs or n in self.children or n in self.removed or n in self.unset_attrs or n in self.removed_trees:
                 raise ValueError('高级属性修改与功能面板冲突，请先撤销其中一项')
             # Advanced editing still only permits existing attributes.
             core.replaced_tag(core.start_tag(self.folder, n)[1], values)
             attrs[n] = values
         patches, delta = [], 0
-        for node in sorted(set(attrs) | set(self.children) | self.removed):
+        for node,(offset,raw,count) in self.removed_trees.items():
+            if node in attrs or node in self.children or node in self.removed or node in self.unset_attrs:raise ValueError('人员删除与其他修改冲突')
+            patches.append((offset,raw,b''));delta-=count
+        for node in sorted(set(attrs) | set(self.children) | self.removed | set(self.unset_attrs)):
             offset, raw = core.start_tag(self.folder, node)
             if node in self.removed:
                 if node in attrs or node in self.children or not raw.rstrip().endswith(b'/>'):
@@ -46,7 +65,15 @@ class Plan:
                 continue
             existing = core.attributes(raw)
             updates = attrs.get(node, {})
-            replacement = core.replaced_tag(raw, {k:v for k,v in updates.items() if k in existing})
+            deleted = self.unset_attrs.get(node,set())
+            if deleted & updates.keys():raise ValueError('同一属性不能同时删除和修改')
+            if not deleted <= existing.keys():raise ValueError('只能移除原有属性')
+            if deleted:
+                def remove(match):
+                    return b'' if match[1].decode('utf-8') in deleted else match[0]
+                base = core.ATTR.sub(remove,raw)
+            else:base = raw
+            replacement = core.replaced_tag(base, {k:v for k,v in updates.items() if k in existing})
             missing = {k:v for k,v in updates.items() if k not in existing}
             if missing:
                 if any(not re.fullmatch(r'[a-zA-Z_][\w.-]*', k) for k in missing):
@@ -68,6 +95,11 @@ class Plan:
                 else:
                     replacement += fragment
             patches.append((offset, raw, replacement))
+        patches.sort()
+        end=-1
+        for offset,raw,replacement in patches:
+            if offset<end:raise ValueError('修改范围重叠，人员删除与其属性修改不能同时应用')
+            end=offset+len(raw)
         return patches, delta
 
     def export(self, changes, destination, progress):

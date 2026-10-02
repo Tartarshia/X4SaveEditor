@@ -137,6 +137,7 @@ class ManagementFeatures:
             editable=bool(spec and not spec['hidden'] and len(nodes)<=1 and safe and len(containers)<=1 and len(hqs)==1 and wid not in active)
             rows.append({'id':wid,'name':self.game.name(wid),'completed':bool(nodes),'nodes':nodes,
                          'prerequisites':spec['prerequisites'] if spec else [],'time':spec['time'] if spec else None,
+                         'resources':spec.get('resources',{}) if spec else {},
                          'mission':spec['mission'] if spec else False,'hidden':spec['hidden'] if spec else True,
                          'active':wid in active,'editable':editable,
                          'reason':'' if editable else '正在科研、内部项目、记录不唯一或未找到唯一总部'})
@@ -203,7 +204,29 @@ class ManagementFeatures:
         research={};licences={};workforce={}
         for command in commands:
             kind=command['kind']
-            if kind=='mod_value':
+            if kind=='mod_config':
+                node=whole(command['id'],1,2**63-1)
+                mod=self.installed_mods().get(node)
+                if not mod or not mod['editable']:raise ValueError('不是可编辑的已安装改装')
+                spec=self.game.modifications.get((mod['category'],str(command.get('ware',''))))
+                if not spec:raise ValueError('目标改装与装备类别不匹配')
+                original=self.attrs(node)
+                old_spec=self.game.modifications.get((mod['category'],mod['ware']))
+                if not old_spec or set(original)-set(old_spec['fields'])-{'ware','generated'}:raise ValueError('原改装包含未知属性，不支持更换')
+                fields=command.get('fields')
+                if not isinstance(fields,dict) or spec['primary'] not in fields or not set(fields)<=set(spec['fields']):raise ValueError('必须包含主属性，且只能选择该改装的附加属性')
+                if len(fields)-1>spec['bonusMax']:raise ValueError('附加属性数量超过该改装定义的上限')
+                updates={'ware':str(command['ware'])}
+                for key,value in fields.items():
+                    if key not in MOD_LABELS or isinstance(value,bool):raise ValueError('无法确认此改装属性')
+                    value=float(value);limit=spec['fields'][key]
+                    if not math.isfinite(value) or not limit['min']<=value<=limit['max']:raise ValueError('改装属性超出游戏范围：'+key)
+                    if key in ABSOLUTE_MOD_FIELDS and not value.is_integer():raise ValueError('容量属性必须为整数')
+                    updates[key]=format(value,'.12g')
+                plan.unset(node,*[key for key in original if key not in updates and key!='generated'])
+                plan.set(node,**updates)
+                plan.summaries.append(f'{self.ship_description(mod["ship"])} / 改装 → {self.game.name(command["ware"])}')
+            elif kind=='mod_value':
                 node=whole(command['id'],1,2**63-1)
                 mod=self.installed_mods().get(node)
                 key=str(command.get('storage',''))

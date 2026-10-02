@@ -36,17 +36,53 @@ async function renderShipMods(parent){
     const section=el('section',undefined,'resource-group');section.append(el('h3',`${mod.categoryName} · ${mod.name} · ${mod.quality===null?'未知品质':'品质 '+mod.quality}`));
     section.append(el('p',`${mod.location} · ${mod.ware} · #${mod.id}`,'muted'));
     if(mod.editable)section.append(button('本改装取最优值',()=>best([mod])));
+    const configKey=commandKey({kind:'mod_config',id:mod.id});const pendingConfig=drafts.get(configKey)||commands.get(configKey);
+    if(pendingConfig)section.append(el('p',`待配置：${pendingConfig.displayValue}；导出时应用。`,'pending'));
     const t=table(['属性','当前值','目标加成 / 数量','游戏随机范围','最优方向']);
     for(const field of mod.fields){const tr=el('tr');cell(tr,`${field.name}\n${field.id}`).className='named-cell';cell(tr,display(field.value,field));
       const scalar=['count','raw'].includes(field.mode);
       const toDisplay=value=>Number(((Number(value)-(field.mode==='factor'?1:0))*(scalar?1:100)).toFixed(8));
       const fromDisplay=value=>value.trim()===''?'':Number((Number(value)/(scalar?1:100)+(field.mode==='factor'?1:0)).toFixed(12));
-      const input=bindDraft(numberInput(toDisplay(currentValue(make(mod,field,field.value))),field.min===null?'':toDisplay(field.min),field.max===null?'':toDisplay(field.max)),value=>make(mod,field,fromDisplay(value)));input.step=field.mode==='count'?'1':'any';input.setAttribute('aria-label',`${mod.id} ${field.id} 改装值`);input.disabled=!field.editable;cell(tr,'').append(input,el('small',field.mode==='raw'?'':scalar?' 单位':' %'));
+      const input=bindDraft(numberInput(toDisplay(currentValue(make(mod,field,field.value))),field.min===null?'':toDisplay(field.min),field.max===null?'':toDisplay(field.max)),value=>make(mod,field,fromDisplay(value)));input.step=field.mode==='count'?'1':'any';input.setAttribute('aria-label',`${mod.id} ${field.id} 改装值`);input.disabled=!field.editable||!!pendingConfig;cell(tr,'').append(input,el('small',field.mode==='raw'?'':scalar?' 单位':' %'));
       cell(tr,field.min===null?'未识别，只读':`${toDisplay(field.min)} ～ ${toDisplay(field.max)}${scalar?'':' %'}`);cell(tr,field.editable?(field.lowerBetter?'越低越好':'越高越好'):'未确认');t.body.append(tr);
     }
-    section.append(t.wrap);parent.append(section);
+    section.append(t.wrap);if(mod.editable)renderModConfiguration(section,mod,data.catalogue,ship,pendingConfig);parent.append(section);
   }
   if(!data.mods.length)parent.append(el('p','这艘飞船没有已记录的船体、引擎、护盾或武器改装。','hint'));
+}
+
+function renderModConfiguration(parent,mod,catalogue,ship,pending){
+  const details=el('details');details.append(el('summary','更换改装 / 选择附加属性'));
+  const choices=catalogue.filter(spec=>spec.category===mod.category);
+  const picker=el('select');picker.setAttribute('aria-label',`${mod.id} 改装类型`);
+  for(const spec of choices){const option=el('option',`${spec.name} · 品质 ${spec.quality} [${spec.ware}]`);option.value=spec.ware;picker.append(option);}
+  picker.value=pending?.ware||mod.ware;
+  const fields=el('div',undefined,'mod-config-fields');details.append(picker,fields);
+  let inputs=[];
+  const fill=()=>{
+    fields.replaceChildren();inputs=[];const spec=choices.find(s=>s.ware===picker.value);if(!spec)return;
+    fields.append(el('p',`必须保留主属性；最多 ${spec.bonusMax} 项附加属性。更换会替换本改装属性，装备本身保持原样。`,'muted'));
+    for(const [key,limits] of Object.entries(spec.fields)){
+      const old=mod.fields.find(f=>f.id===key);const row=el('label',undefined,'mod-config-field');
+      const pick=el('input');pick.type='checkbox';pick.checked=key===spec.primary||!!(pending?.ware===spec.ware&&key in pending.fields)||(!pending&&picker.value===mod.ware&&!!old);pick.disabled=key===spec.primary;
+      pick.setAttribute('aria-label',`${mod.id} 选择附加属性 ${key}`);
+      const count=['unitcapacity','missilecapacity','deployablecapacity','countermeasurecapacity'].includes(key);
+      const direct=['radarcloak','regiondamage','hidecargochance'].includes(key);
+      const lower=['mass','drag','chargetime','travelchargetime','travelattacktime','rechargedelay','radarcloak'].includes(key);
+      const toDisplay=n=>Number(((n-(count||direct?0:1))*(count?1:100)).toFixed(8));
+      const toNative=n=>Number((Number(n)/(count?1:100)+(count||direct?0:1)).toFixed(12));
+      const native=pending?.ware===spec.ware&&key in pending.fields?pending.fields[key]:picker.value===mod.ware&&old?old.value:lower?limits.min:limits.max;
+      const input=numberInput(toDisplay(native),toDisplay(limits.min),toDisplay(limits.max));input.step=count?'1':'any';input.setAttribute('aria-label',`${mod.id} 配置 ${key}`);
+      row.append(pick,el('span',`${old?.name||limits.name||key}${key===spec.primary?'（主属性）':''}`),input,el('small',count?'单位':'%'));fields.append(row);inputs.push({key,pick,input,toNative});
+    }
+  };picker.onchange=fill;fill();
+  details.append(button('加入改装配置草稿',async()=>{
+    const chosen={};for(const item of inputs)if(item.pick.checked){if(item.input.value==='')throw new Error('请输入属性数值');chosen[item.key]=item.toNative(item.input.value);}
+    for(const [key,c] of drafts)if(c.kind==='mod_value'&&String(c.id)===String(mod.id))drafts.delete(key);
+    const spec=choices.find(s=>s.ware===picker.value);
+    queueDraft({kind:'mod_config',id:mod.id,ware:picker.value,fields:chosen,value:picker.value,original:mod.ware,
+      label:`${ship?shipLabel(ship):mod.ship} / ${mod.location} / 改装配置`,displayOriginal:mod.name,displayValue:`${spec.name} · ${Object.keys(chosen).length} 项属性`});await renderFeature();
+  }),xmlButton({kind:'mod_config',id:mod.id,label:`${mod.name} 原始配置`}));parent.append(details);
 }
 
 async function renderHeadquarters(parent){
@@ -56,16 +92,19 @@ async function renderHeadquarters(parent){
   parent.append(el('p','完成一项科研时会同时补齐前置科研；取消完成会撤销依赖它的后续科研。这里只管理完成记录，关联剧情任务和奖励仍由游戏处理。正在执行的科研及内部项目只读。','muted'));
   const targets=dependencyPreview(data.rows,'research');
   const filter=el('input');filter.placeholder='搜索科研名称 / ID';filter.setAttribute('aria-label','筛选总部科研');parent.append(filter);
-  const t=table(['科研 / ID','存档状态','目标状态','前置科研']);
+  const t=table(['科研 / ID','存档状态','目标状态','前置科研','科研资源']);
   const names=new Map(data.rows.map(row=>[row.id,row.name]));
   for(const row of data.rows){const tr=el('tr');cell(tr,`${row.name}\n${row.id}${row.mission?' · 任务前置':''}`).className='named-cell';cell(tr,row.active?'正在执行':row.completed?'已完成':'未完成');
     const make=value=>({kind:'research',id:row.id,value,original:Number(row.completed),label:`总部科研：${row.name}`});
     const select=targetToggle(Number(targets.has(row.id)),`${row.id} 科研状态`,!row.editable,async value=>{queueDraft(make(value));await renderFeature();});
     select.xmlCommand=()=>make(select.value);select.options[0].textContent='未完成';select.options[1].textContent='已完成';cell(tr,'').append(select);
     cell(tr,row.prerequisites.map(id=>names.get(id)||id).join(' / ')||'无').className='named-cell';
+    const resources=cell(tr,Object.entries(row.resources||{}).map(([id,amount])=>`${id} × ${fmt(amount)}`).join('\n')||'无物资需求');
+    if(!row.completed&&Object.keys(row.resources||{}).length){const c={kind:'research_stock',id:row.id,value:1,original:0,label:`总部补齐科研资源：${row.name}`,displayValue:'按需求补齐库存'};resources.append(draftAction('补齐所需资源',c),xmlButton(c));}
     if(targets.has(row.id)!==row.completed)tr.classList.add('pending');if(!row.editable)tr.title=row.reason;t.body.append(tr);
   }
   filter.oninput=()=>{const q=filter.value.trim().toLowerCase();for(const tr of t.body.rows)tr.hidden=!tr.cells[0].textContent.toLowerCase().includes(q);};parent.append(t.wrap);
+  await renderResearchTimers(parent);
 }
 
 async function renderLicences(parent){

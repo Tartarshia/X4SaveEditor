@@ -8,7 +8,8 @@ import core
 from edits import Plan, element
 from game_data import GameData, DEFAULT_GAME
 import shortcuts
-from management import ManagementFeatures
+from management import ManagementFeatures, MOD_LABELS, whole
+from expansion import ExpansionFeatures
 
 SKILLS = ('piloting', 'management', 'engineering', 'boarding', 'morale')
 DIPLOMACY_EXPERIENCE = {'negotiation':'$diplomacy_exp_negotiation','espionage':'$diplomacy_exp_espionage'}
@@ -39,7 +40,7 @@ def inventory_group(wid, ware):
     return 'other'
 
 
-class Editor(ManagementFeatures):
+class Editor(ManagementFeatures, ExpansionFeatures):
     def __init__(self, folder, game_path=None, progress=lambda m: None, catalog=None):
         self.folder = Path(folder)
         self.db = sqlite3.connect((self.folder / 'index.db').resolve().as_uri() + '?mode=ro', uri=True)
@@ -158,6 +159,17 @@ class Editor(ManagementFeatures):
         self.station_storages.cache_clear()
         self.diplomacy_agents.cache_clear()
         self.installed_mods.cache_clear()
+        self.ship_components.cache_clear()
+        self.equipment_catalogue.cache_clear()
+        self.ammo_catalogue.cache_clear()
+        self.galaxy_sectors.cache_clear()
+        self.sector_objects.cache_clear()
+        self.encyclopedia_records.cache_clear()
+        self.game.library.cache_clear()
+        self.game.model.cache_clear()
+        self.game.component.cache_clear()
+        self.game.component_paths.cache_clear()
+        self.game.map_positions.cache_clear()
         self.workforce_data.cache_clear()
 
     @lru_cache(maxsize=50000)
@@ -548,6 +560,8 @@ class Editor(ManagementFeatures):
     def source_nodes(self, command):
         """Locate immutable source records, including insertion parents and side effects."""
         kind = command.get('kind')
+        if kind in ('ammunition','repair','refit','crew_role','crew_count','map_known','map_reveal','encyclopedia','station_price','station_rule','station_restriction','station_allocation','research_stock','research_time'):
+            return self.expansion_sources(command)
         identity = command.get('id')
         nodes = []
         def add(node, role='原始记录'):
@@ -581,16 +595,17 @@ class Editor(ManagementFeatures):
                     leaves(parent,'relation','faction',b,faction)
                     for node in self.children(parent,'booster'):
                         if self.attrs(node).get('faction')==b:add(node,'临时关系加成')
-        elif kind in ('blueprint','research'):
-            parent = self.first(self.player,'blueprints' if kind=='blueprint' else 'research')
-            leaves(parent,kind,'ware',str(identity),self.player)
+        elif kind in ('blueprint','blueprint_remove','research'):
+            tag = 'blueprint' if kind.startswith('blueprint') else 'research'
+            parent = self.first(self.player,'blueprints' if tag=='blueprint' else 'research')
+            leaves(parent,tag,'ware',str(identity),self.player)
         elif kind == 'licence':
             faction = self.factions.get('player')
             if faction:leaves(self.first(faction,'licences'),'licence','type',str(command.get('storage')),faction)
         elif kind == 'crew':
             crew = self.crew.get(int(identity))
             if crew:add(crew['skill_node'] or crew['parent'] or int(identity),'原始技能 / 所属节点')
-        elif kind == 'mod_value':
+        elif kind in ('mod_value','mod_config'):
             mod = self.installed_mods().get(int(identity))
             if mod:add(mod['id'])
         elif kind == 'workforce':
@@ -625,7 +640,7 @@ class Editor(ManagementFeatures):
         except (ValueError,TypeError,KeyError,OverflowError):
             plan = None
         if plan:
-            for node in sorted(set(plan.attrs)|set(plan.children)|plan.removed):
+            for node in sorted(set(plan.attrs)|set(plan.children)|plan.removed|set(plan.unset_attrs)):
                 add(node,'新增位置的原始父节点' if node in plan.children else '删除前的原始记录' if node in plan.removed else '联动修改的原始记录')
         return {'nodes':nodes}
 
@@ -635,6 +650,17 @@ class Editor(ManagementFeatures):
         kind = request.get('kind','home')
         if kind == 'source_nodes':
             return self.source_nodes(request['command'])
+        if kind == 'ammunition':return self.ammo_data(request)
+        if kind in ('ship_service','crew_roster'):
+            data=self.ship_service_data(request) if kind=='ship_service' else self.crew_roster(request)
+            rows=data['rows'];page=whole(request.get('page',0),0,100000)
+            data.update(total=len(rows),page=page,rows=rows[page*100:(page+1)*100])
+            if kind=='crew_roster':data['counts']={role['id']:sum(r['role']==role['id'] for r in rows) for role in data['roles']}
+            return data
+        if kind == 'map':return self.map_data(request)
+        if kind == 'encyclopedia':return self.encyclopedia_data(request)
+        if kind == 'station_settings':return self.station_settings(request)
+        if kind == 'research_tasks':return {'rows':self.research_tasks()}
         if kind == 'home':
             money = next((self.attrs(n).get('amount') for n in self.members.get('money',[]) if 'amount' in self.attrs(n)),None)
             if money is None:
@@ -667,7 +693,9 @@ class Editor(ManagementFeatures):
             ship = int(request.get('ship') or self.current or 0)
             if ship not in self.ships:
                 raise ValueError('请选择玩家飞船')
-            return {'ship':ship,'mods':[r for r in self.installed_mods().values() if r['ship']==ship]}
+            return {'ship':ship,'mods':[r for r in self.installed_mods().values() if r['ship']==ship],
+                    'catalogue':[{'category':cat,'ware':ware,'name':self.game.name(ware),**spec,'fields':{k:{**v,'name':MOD_LABELS.get(k,k)} for k,v in spec['fields'].items()}}
+                                 for (cat,ware),spec in self.game.modifications.items()]}
         if kind == 'hq':
             return self.research_data(request)
         if kind == 'licences':
@@ -721,15 +749,22 @@ class Editor(ManagementFeatures):
             key = (kind,c.get('id'),c.get('storage'),c.get('skill'))
             unique.pop(key, None)
             unique[key] = c
+        configs={int(c['id']) for c in unique.values() if c.get('kind')=='mod_config'}
+        if any(c.get('kind')=='mod_value' and int(c['id']) in configs for c in unique.values()):raise ValueError('改装配置与原有属性编辑冲突，请撤销同一改装的属性修改')
+        refits={int(c['id']) for c in unique.values() if c.get('kind')=='refit'}
+        if any(c.get('kind')=='repair' and int(c['id']) in refits for c in unique.values()):raise ValueError('同一装备不能同时换装和按旧容量维修')
         new_blueprints = []
         cargo_changes = {}
         stock_changes = {}
         inventory_changes = {}
         management_changes = []
+        expansion_changes = []
         missing_relations = {}
         for c in unique.values():
             kind = c.get('kind')
-            if kind in ('mod_value','research','licence','workforce'):
+            if kind in ('ammunition','repair','refit','crew_role','crew_count','map_known','map_reveal','encyclopedia','station_price','station_rule','station_restriction','station_allocation','research_stock','research_time'):
+                expansion_changes.append(c)
+            elif kind in ('mod_value','mod_config','research','licence','workforce'):
                 management_changes.append(c)
             elif kind == 'money':
                 amount = integer(c['value'],0,999999999999999)
@@ -847,6 +882,13 @@ class Editor(ManagementFeatures):
                     raise ValueError('不是本机已识别的可用蓝图：' + str(wid))
                 new_blueprints.append(element('blueprint',{'ware':wid}))
                 plan.summaries.append('解锁蓝图：' + self.game.name(wid) + ' [' + wid + ']')
+            elif kind == 'blueprint_remove':
+                wid = str(c['id'])
+                records = [n for n in self.children(self.first(self.player,'blueprints'),'blueprint') if self.attrs(n).get('ware')==wid]
+                if len(records)!=1:raise ValueError('蓝图记录缺失或不唯一')
+                if self.db.execute('SELECT 1 FROM nodes WHERE parent=? LIMIT 1',(records[0],)).fetchone():raise ValueError('蓝图记录包含未知子节点')
+                plan.remove_leaf(records[0])
+                plan.summaries.append('撤销蓝图：'+self.game.name(wid))
             elif kind == 'crew':
                 n = integer(c['id'],1,2**63-1)
                 if n not in self.crew:
@@ -915,6 +957,17 @@ class Editor(ManagementFeatures):
             if additions:
                 xml = ''.join(additions)
                 plan.add(data['cargo'] or storage,xml if data['cargo'] else element('cargo',children=xml))
+        for command in expansion_changes:
+            if command['kind']!='research_stock':continue
+            spec=self.game.research.get(str(command['id']));hqs=self.headquarters()
+            if not spec or spec['hidden'] or len(hqs)!=1:raise ValueError('未找到科研或唯一总部')
+            station=hqs[0];data=self.station_resources({'station':station})
+            current={r['id']:r['amount'] for r in data['ordinaryWares']}
+            updates=stock_changes.setdefault((station,False),{})
+            for wid,amount in spec.get('resources',{}).items():
+                if wid in updates and updates[wid]<amount:raise ValueError('总部库存草稿与科研所需物资冲突')
+                updates[wid]=max(amount,current.get(wid,0),updates.get(wid,0))
+        expansion_changes=[c for c in expansion_changes if c['kind']!='research_stock']
         for (station,build),updates in stock_changes.items():
             self.plan_station_stock(plan,station,build,updates)
         for holder, updates in inventory_changes.items():
@@ -940,6 +993,7 @@ class Editor(ManagementFeatures):
                 xml = ''.join(additions)
                 plan.add(inventory or holder,xml if inventory else element('inventory',children=xml))
         self.plan_management(plan,management_changes)
+        self.plan_expansion(plan,expansion_changes)
         return plan
 
 

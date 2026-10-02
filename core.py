@@ -216,6 +216,39 @@ def details(folder, node):
     return attributes(raw), preview
 
 
+def bounded_element(folder, node, limit=65536):
+    """Read one vetted small element, stopping exactly at its closing tag."""
+    offset,raw=start_tag(folder,node)
+    if raw.rstrip().endswith(b'/>'):return offset,raw
+    p=parser();depth=0;end=None
+    class Complete(Exception):pass
+    def start(tag,attrs):
+        nonlocal depth
+        depth+=1
+    def finish(tag):
+        nonlocal depth,end
+        depth-=1
+        if depth==0:
+            end=p.CurrentByteIndex
+            raise Complete()
+    p.StartElementHandler=start;p.EndElementHandler=finish
+    data=bytearray()
+    with open(Path(folder)/'source.xml','rb') as stream:
+        stream.seek(offset)
+        while len(data)<limit:
+            block=stream.read(min(4096,limit-len(data)))
+            if not block:raise ValueError('节点原文被截断')
+            data.extend(block)
+            try:p.Parse(block,False)
+            except Complete:
+                closing=data.find(b'>',end)
+                if closing<0:
+                    tail=stream.read(256);data.extend(tail);closing=data.find(b'>',end)
+                if closing<0:raise ValueError('结束标签损坏')
+                return offset,bytes(data[:closing+1])
+    raise ValueError('节点超过安全删除片段上限')
+
+
 def replaced_tag(raw, edits):
     original = attributes(raw)
     if not edits.keys() <= original.keys():

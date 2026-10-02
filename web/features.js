@@ -12,7 +12,7 @@ let blueprintGroup='';
 let diplomacySource='', diplomacyTarget='';
 let gamePathValue='';
 try { gamePathValue=localStorage.getItem('x4-game-path')||''; } catch {}
-const titles={money:'玩家金钱',station_resources:'空间站资源',hq:'总部 / 科研',ship_mods:'已安装飞船改装',relations:'势力关系',diplomacy:'外交与特工',cargo:'飞船货仓',inventory:'特殊物品',blueprints:'解锁蓝图',crew:'船员技能'};
+const titles={money:'玩家金钱',station_resources:'空间站资源',hq:'总部 / 科研',ship_mods:'已安装飞船改装',relations:'势力关系',diplomacy:'外交与特工',cargo:'飞船货仓',inventory:'特殊物品',blueprints:'解锁蓝图',crew:'船员技能',ammunition:'弹药与部署物',ship_service:'飞船维护与换装',crew_roster:'船员数量与岗位',map:'星区地图',encyclopedia:'百科解锁'};
 const skillNames={all:'全部五项技能',piloting:'驾驶',management:'管理',engineering:'工程',boarding:'登舰',morale:'士气'};
 const groups={ships:'舰船',engines:'引擎',shields:'护盾',weapons:'武器',turrets:'炮塔',missiles:'导弹',drones:'无人机',countermeasures:'干扰弹',deployables:'部署物',modules:'空间站模块'};
 function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
@@ -24,7 +24,7 @@ function updateDraftCount(){const count=drafts.size+advancedDrafts.size;const bu
 function queueDraft(c){
   const key=commandKey(c), all=c.kind==='crew'&&c.skill!=='all'?`crew:${c.id}::all`:'';
   const baseline=drafts.get(all)?.value??commands.get(key)?.value??commands.get(all)?.value??c.original;
-  if(c.kind!=='blueprint'&&String(c.value)===String(baseline))drafts.delete(key);
+  if(!['blueprint','mod_config'].includes(c.kind)&&String(c.value)===String(baseline))drafts.delete(key);
   else drafts.set(key,c);
   updateDraftCount();
 }
@@ -60,6 +60,7 @@ function advancedChanges(source=changes){const result={};for(const c of source.v
 async function stage(list){
   if(!list.length&&!advancedDrafts.size)throw new Error('请先修改内容');
   const next=new Map(commands);for(const c of list){
+    if(c.kind==='mod_config')for(const [k,v] of next)if(v.kind==='mod_value'&&String(v.id)===String(c.id))next.delete(k);
     if(c.kind==='crew'&&c.skill==='all')for(const [k,v] of next)if(v.kind==='crew'&&v.id===c.id)next.delete(k);
     next.delete(commandKey(c));next.set(commandKey(c),c);
   }
@@ -140,6 +141,11 @@ async function renderFeatureContent(){
   if(feature==='cargo'){await renderCargo(parent);return;}
   if(feature==='inventory'){await renderInventory(parent);return;}
   if(feature==='ship_mods'){await renderShipMods(parent);return;}
+  if(feature==='ammunition'){await renderAmmunition(parent);return;}
+  if(feature==='ship_service'){await renderShipService(parent);return;}
+  if(feature==='crew_roster'){await renderCrewRoster(parent);return;}
+  if(feature==='map'){await renderGalaxy(parent);return;}
+  if(feature==='encyclopedia'){await renderEncyclopedia(parent);return;}
   if(feature==='hq'){await renderHeadquarters(parent);return;}
   if(feature==='station_resources'){await renderStationResources(parent);return;}
   if(feature==='diplomacy'){await renderDiplomacy(parent);return;}
@@ -195,7 +201,13 @@ async function renderFeatureContent(){
       if(feature==='blueprints'&&drafts.has(`blueprint:${r.id}::`)){pick.checked=true;selected.add(r.id);}
       cell(tr,'').append(pick);
       if(feature==='blueprints')pick.xmlCommand=()=>({kind:'blueprint',id:r.id,label:`蓝图：${r.name} [${r.id}]`});
-      if(feature==='blueprints'){cell(tr,`${r.name}\n${r.id}`).className='named-cell';cell(tr,groups[r.group]||r.group);cell(tr,r.owned?'已拥有':commands.has(`blueprint:${r.id}::`)?'待解锁':'未拥有');}
+      if(feature==='blueprints'){
+        cell(tr,`${r.name}\n${r.id}`).className='named-cell';cell(tr,groups[r.group]||r.group);
+        const status=cell(tr,r.owned?'已拥有':commands.has(`blueprint:${r.id}::`)?'待解锁':'未拥有');
+        if(r.owned){const c={kind:'blueprint_remove',id:r.id,value:0,original:1,label:`撤销蓝图：${r.name} [${r.id}]`,displayOriginal:'已拥有',displayValue:'撤销'};
+          status.append(button('撤销此蓝图',async()=>{queueDraft(c);await renderFeature();}));
+          if(drafts.has(commandKey(c))||commands.has(commandKey(c)))status.append(el('small',' 待撤销'));}
+      }
       else{
         cell(tr,`${r.name}\n${r.role} · #${r.id}`).className='named-cell';cell(tr,r.sector.name);cell(tr,r.ship);
         const skillBox=el('div',undefined,'crew-skills');const inputs={};
@@ -392,6 +404,7 @@ async function renderStationResources(parent){
   if(data.production.length){const t=table(['模块名称','数量','macro']);for(const p of data.production){const tr=el('tr');cell(tr,p.name);cell(tr,fmt(p.count));cell(tr,p.macro);t.body.append(tr);}production.append(t.wrap);}
   else production.append(el('p','没有识别到生产模块。','muted'));
   parent.append(production);
+  await renderStationSettings(parent,data.station);
 }
 function starSelect(value){const s=el('select');s.dataset.work='';for(let i=0;i<=15;i++){const o=el('option',`${Number((i/3).toFixed(2))} 星`);o.value=i;s.append(o);}s.value=String(value);return s;}
 async function renderCargo(parent){

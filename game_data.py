@@ -13,6 +13,9 @@ class GameData:
         self.path = Path(path)
         self.warnings = []
         self.layers = []
+        self.layer_origins = []
+        self.sector_sources = {}
+        self.source_names = {'base':'基础游戏','unknown':'来源未确认'}
         self.texts = {}
         self.wares = {}
         self.factions = {}
@@ -44,6 +47,11 @@ class GameData:
                 self.warnings.append('缺少存档所需 DLC：' + ext)
         languages = {'044':{}, '086':{}}
         for root in roots:
+            origin='base' if root==self.path else root.name
+            self.layer_origins.append(origin)
+            if origin!='base':
+                try:self.source_names[origin]=ET.parse(root/'content.xml').getroot().get('name') or origin
+                except (OSError,ET.ParseError):self.source_names[origin]=origin
             layer = {}
             for cat in sorted(root.glob('*.cat')):
                 if '_sig' in cat.name:
@@ -57,7 +65,7 @@ class GameData:
                         layer[key] = (cat.with_suffix('.dat'), offset, size)
                     offset += size
             # Loose resources take precedence within the same layer.
-            for prefix in ('libraries', 't', 'assets'):
+            for prefix in ('libraries', 't', 'assets', 'maps'):
                 for file in (root / prefix).rglob('*.xml'):
                     layer[file.relative_to(root).as_posix().lower()] = (file, 0, file.stat().st_size)
             self.layers.append(layer)
@@ -76,7 +84,7 @@ class GameData:
         self.texts.update(languages['086'])
         for resource, tag, output in [('libraries/wares.xml', 'ware', self.wares), ('libraries/factions.xml', 'faction', self.factions), ('libraries/mapdefaults.xml', 'dataset', self.sectors)]:
             merged = None
-            for layer in self.layers:
+            for layer,origin in zip(self.layers,self.layer_origins):
                 if resource not in layer:
                     continue
                 tree = self.read(layer[resource])
@@ -106,6 +114,12 @@ class GameData:
                         merged = tree
                 elif merged is not None:
                     self.patch(merged, tree, resource)
+                if tag=='dataset' and merged is not None:
+                    # Record the introducing layer; later naming patches do not
+                    # change which expansion originally supplied a sector.
+                    for dataset in merged.findall('dataset'):
+                        macro=dataset.get('macro','').lower()
+                        if macro:self.sector_sources.setdefault(macro,origin)
             if merged is None:
                 continue
             for item in merged.findall(tag):
@@ -123,6 +137,7 @@ class GameData:
                 if tag == 'ware':
                     component = item.find('component')
                     if component is not None and component.get('ref'):
+                        data['component'] = component.get('ref').lower()
                         self.component_names[component.get('ref').lower()] = data['name']
                     tags = set(data.get('tags', '').split())
                     data['blueprint'] = ((data.get('transport') in ('equipment','ship') or 'module' in tags) and item.find('production') is not None
@@ -132,12 +147,15 @@ class GameData:
                     elif 'module' in tags:
                         data['group'] = 'modules'
                     data['volume'] = float(data.get('volume', '1'))
+                    price=item.find('price')
+                    data['price']={k:float(v) for k,v in price.attrib.items() if k in ('min','max','average')} if price is not None else {}
                     research = item.find('research')
                     if data.get('transport') == 'research' and research is not None:
                         self.research[identity] = {'id':identity,'name':data['name'],
                             'description':self.translate(data.get('description','')),
                             'prerequisites':[w.get('ware') for w in research.findall('research/ware') if w.get('ware')],
                             'time':float(research.get('time',0)),'tags':data.get('tags',''),
+                            'resources':{w.get('ware'):int(w.get('amount',0)) for w in research.findall('primary/ware') if w.get('ware')},
                             'hidden':'hidden' in tags,'mission':'missiononly' in tags}
                 elif tag == 'faction':
                     self.licences[identity] = {n.get('type'):{**n.attrib,'name':self.translate(n.get('name'))}
@@ -157,12 +175,14 @@ class GameData:
                         low,high = float(field.get('min')),float(field.get('max'))
                         fields[field.tag] = {'min':low,'max':high}
                     self.modifications[(category.tag,wid)] = {'quality':int(mod.get('quality',0)),
-                                                             'primary':mod.tag,'fields':fields}
+                                                             'primary':mod.tag,'fields':fields,
+                                                             'bonusMax':sum(int(b.get('max',0)) for b in mod.findall('bonus'))}
         races = self.library('libraries/races.xml')
         if races is not None:
             self.races = {n.get('id'):self.translate(n.get('name',n.get('id','')))
                           for n in races.findall('race') if n.get('id')}
 
+    @lru_cache(maxsize=512)
     def library(self, path):
         merged = None
         for layer in self.layers:
@@ -174,6 +194,68 @@ class GameData:
             elif merged is not None:
                 self.patch(merged,tree,path)
         return merged
+
+    @lru_cache(maxsize=4096)
+    def model(self, macro):
+        path=self.macro_paths.get(str(macro).lower())
+        root=self.library(path) if path else None
+        return next((n for n in root.iter('macro') if n.get('name','').lower()==str(macro).lower()),None) if root is not None else None
+
+    @lru_cache(maxsize=4096)
+    def component(self, ref):
+        for path in self.component_paths().get(str(ref).lower(),[]):
+            root=self.library(path)
+            found=next((n for n in root.iter('component') if n.get('name','').lower()==str(ref).lower()),None)
+            if found is not None:return found
+        return None
+
+    @lru_cache(maxsize=1)
+    def component_paths(self):
+        result={}
+        for layer in reversed(self.layers):
+            for path in layer:
+                if path.startswith('assets/') and '/macros/' not in path:result.setdefault(Path(path).stem.lower(),[]).append(path)
+        return result
+
+    def properties(self, macro, path):
+        model=self.model(macro)
+        result={}
+        if model is None:return result
+        defaults=self.library('libraries/defaults.xml')
+        if defaults is not None:
+            classes=['ship',model.get('class')] if model.get('class','').startswith('ship_') else [model.get('class')]
+            for cls in classes:
+                for dataset in defaults.findall('dataset'):
+                    if dataset.get('class')==cls:
+                        prop=dataset.find('properties/'+path)
+                        if prop is not None:result.update(prop.attrib)
+        prop=model.find('properties/'+path)
+        if prop is not None:result.update(prop.attrib)
+        return result
+
+    def macro_for_ware(self, ware):
+        ref=self.wares.get(ware,{}).get('component','')
+        if ref in self.macro_paths:return ref
+        candidate=ref+'_macro'
+        return candidate if candidate in self.macro_paths else None
+
+    def sector_source(self,macro):
+        origin=self.sector_sources.get(str(macro).lower(),'unknown')
+        return {'id':origin,'name':self.translate(self.source_names.get(origin,origin))}
+
+    @lru_cache(maxsize=1)
+    def map_positions(self):
+        """Relative positions from the installed universe, including DLC diffs."""
+        result={}
+        for filename in ('galaxy.xml','clusters.xml'):
+            root=self.library('maps/xu_ep2_universe/'+filename)
+            if root is None:continue
+            for macro in root.findall('macro'):
+                for connection in macro.findall('connections/connection'):
+                    child=connection.find('macro');position=connection.find('offset/position')
+                    if child is not None and position is not None:
+                        result[(macro.get('name','').lower(),child.get('ref','').lower())]={k:float(position.get(k,0)) for k in ('x','z')}
+        return result
 
     @lru_cache(maxsize=4096)
     def habitation(self, macro):
