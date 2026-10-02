@@ -8,10 +8,11 @@ let stationSearch='', stationSector='', stationPage=0;
 let resourceStation='';
 let inventoryHolder='';
 let inventoryGroup='other';
+let blueprintGroup='';
 let diplomacySource='', diplomacyTarget='';
 let gamePathValue='';
 try { gamePathValue=localStorage.getItem('x4-game-path')||''; } catch {}
-const titles={money:'玩家金钱',station_resources:'空间站资源',relations:'势力关系',diplomacy:'外交与特工',cargo:'飞船货仓',inventory:'特殊物品',blueprints:'解锁蓝图',crew:'船员技能'};
+const titles={money:'玩家金钱',station_resources:'空间站资源',hq:'总部 / 科研',ship_mods:'已安装飞船改装',relations:'势力关系',diplomacy:'外交与特工',cargo:'飞船货仓',inventory:'特殊物品',blueprints:'解锁蓝图',crew:'船员技能'};
 const skillNames={all:'全部五项技能',piloting:'驾驶',management:'管理',engineering:'工程',boarding:'登舰',morale:'士气'};
 const groups={ships:'舰船',engines:'引擎',shields:'护盾',weapons:'武器',turrets:'炮塔',missiles:'导弹',drones:'无人机',countermeasures:'干扰弹',deployables:'部署物',modules:'空间站模块'};
 function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
@@ -48,7 +49,9 @@ async function stage(list){
 }
 function appendCommandReview(body){
   for(const [key,c] of commands){
-    const tr=el('tr');cell(tr,c.label||titles[c.kind]||c.kind);cell(tr,c.original??'新增');cell(tr,c.kind==='blueprint'?'解锁':c.kind==='crew'?`${Number(c.value)/3} 星`:c.value);
+    const tr=el('tr');cell(tr,c.label||titles[c.kind]||c.kind);
+    cell(tr,c.displayOriginal??(c.kind==='research'?(Number(c.original)?'已完成':'未完成'):c.kind==='licence'?(Number(c.original)?'持有':'未持有'):c.original??'新增'));
+    cell(tr,c.displayValue??(c.kind==='blueprint'?'解锁':c.kind==='crew'?`${Number(c.value)/3} 星`:c.kind==='research'?(Number(c.value)?'完成（含前置）':'取消完成（含后续）'):c.kind==='licence'?(Number(c.value)?'授予（含前置）':'撤销（含依赖）'):c.value));
     cell(tr,'').append(button('撤销',async()=>{commands.delete(key);updateCount();tr.remove();await renderFeature();}));body.append(tr);
   }
 }
@@ -59,6 +62,7 @@ function showMode(){
   if(!advanced)$('featureTitle').textContent=titles[feature];
 }
 async function loadGameplay(){
+  licenceFaction='';
   gameHome=await job('gameplay',{kind:'home',gamePath:gamePathValue});
   if(selectedSector&&!gameHome.sectors.some(s=>s.id===selectedSector))selectedSector='';
   if(selectedShip&&!gameHome.ships.some(s=>String(s.id)===String(selectedShip)&&(!selectedSector||s.sector.id===selectedSector)))selectedShip='';
@@ -111,6 +115,8 @@ async function renderFeature(){
   }
   if(feature==='cargo'){await renderCargo(parent);return;}
   if(feature==='inventory'){await renderInventory(parent);return;}
+  if(feature==='ship_mods'){await renderShipMods(parent);return;}
+  if(feature==='hq'){await renderHeadquarters(parent);return;}
   if(feature==='station_resources'){await renderStationResources(parent);return;}
   if(feature==='diplomacy'){await renderDiplomacy(parent);return;}
   const bar=searchBar(parent);
@@ -121,7 +127,13 @@ async function renderFeature(){
   }
   if(feature==='crew')parent.append(el('p','每 3 点技能 = 1 星。可编辑单人的单项技能，也可勾选本页人员批量设置。不会改变船员岗位。','muted'));
   if(feature==='relations')parent.append(el('p','同步双方基础关系，并将双方对彼此的临时加成归零。被游戏锁定的势力显示为只读；剧情仍可能再次改变关系。','muted'));
-  const data=await job('gameplay',{kind:feature,search:featureSearch,page:featurePage,ship:selectedShip,sector:selectedSector,ownership:blueprintOwnership,includeInternal:includeInternalFactions,gamePath:gamePathValue});
+  const data=await job('gameplay',{kind:feature,search:featureSearch,page:featurePage,ship:selectedShip,sector:selectedSector,ownership:blueprintOwnership,group:blueprintGroup,includeInternal:includeInternalFactions,gamePath:gamePathValue});
+  if(feature==='blueprints'){
+    const group=el('select');group.setAttribute('aria-label','蓝图分类');group.dataset.work='';
+    const all=el('option','全部分类');all.value='';group.append(all);
+    for(const value of data.groups){const option=el('option',groups[value]||value);option.value=value;group.append(option);}
+    group.value=blueprintGroup;group.onchange=work(async()=>{blueprintGroup=group.value;featurePage=0;await renderFeature();});bar.append(group);
+  }
   if(feature==='relations'){
     const label=el('label');const toggle=el('input');toggle.type='checkbox';toggle.id='includeInternalFactions';toggle.checked=includeInternalFactions;toggle.dataset.work='';
     toggle.onchange=work(async()=>{includeInternalFactions=toggle.checked;featurePage=0;await renderFeature();});
@@ -167,6 +179,7 @@ async function renderFeature(){
     t.body.append(tr);
   }
   parent.append(t.wrap);if(!data.rows.length)parent.append(el('p','没有匹配项目。可以调整搜索条件或检查游戏资源目录。','empty'));pages(parent,data);
+  if(feature==='relations')await renderLicences(parent);
 }
 async function renderDiplomacy(parent){
   const data=await job('gameplay',{kind:'diplomacy',source:diplomacySource,target:diplomacyTarget,gamePath:gamePathValue});
@@ -297,6 +310,7 @@ async function renderStationResources(parent){
   if(!current){parent.append(el('p','没有玩家空间站。','empty'));return;}
   parent.append(el('p',`${current.name}${current.code?' · '+current.code:''}　|　${current.sector.name}`,'resource-station-title'),
                 el('p','按物资汇总空间站实体货仓；建造仓储独立列出。修改的是库存总量，暂存时按货仓类型、单件体积和剩余容量分配到实体货仓。经理的自动配额、交易订单和生产逻辑不会随库存一同修改。','muted'));
+  renderWorkforce(parent,data,current);
   const renderGroup=(title,kind,storages,listed,indicators,reason='')=>{
     const section=el('section',undefined,'resource-group');
     section.append(el('h3',`${title} · ${storages.length} 个货仓 · ${listed.length} 种现有物资`));

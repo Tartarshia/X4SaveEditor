@@ -8,6 +8,7 @@ import core
 from edits import Plan, element
 from game_data import GameData, DEFAULT_GAME
 import shortcuts
+from management import ManagementFeatures
 
 SKILLS = ('piloting', 'management', 'engineering', 'boarding', 'morale')
 DIPLOMACY_EXPERIENCE = {'negotiation':'$diplomacy_exp_negotiation','espionage':'$diplomacy_exp_espionage'}
@@ -38,7 +39,7 @@ def inventory_group(wid, ware):
     return 'other'
 
 
-class Editor:
+class Editor(ManagementFeatures):
     def __init__(self, folder, game_path=None, progress=lambda m: None, catalog=None):
         self.folder = Path(folder)
         self.db = sqlite3.connect((self.folder / 'index.db').resolve().as_uri() + '?mode=ro', uri=True)
@@ -156,6 +157,8 @@ class Editor:
         self.zone.cache_clear()
         self.station_storages.cache_clear()
         self.diplomacy_agents.cache_clear()
+        self.installed_mods.cache_clear()
+        self.workforce_data.cache_clear()
 
     @lru_cache(maxsize=50000)
     def zone(self,n):
@@ -438,6 +441,7 @@ class Editor:
                     row['locations'] += 1
             return sorted(summary.values(),key=lambda r:(r['name'],r['id']))
         return {'stations':stations,'station':station,'ordinary':ordinary,'building':building,
+                'workforce':self.workforce_data(station),
                 'ordinaryWares':summarize(ordinary),'buildingWares':summarize(building),
                 'ordinaryIndicators':indicators(station),'buildingIndicators':indicators(build_root) if build_root else [],
                 'constructionReason':construction['reason'] if not build_root else '',
@@ -573,6 +577,15 @@ class Editor:
             return self.station_resources(request)
         if kind == 'inventory':
             return self.inventory_data(request)
+        if kind == 'ship_mods':
+            ship = int(request.get('ship') or self.current or 0)
+            if ship not in self.ships:
+                raise ValueError('请选择玩家飞船')
+            return {'ship':ship,'mods':[r for r in self.installed_mods().values() if r['ship']==ship]}
+        if kind == 'hq':
+            return self.research_data(request)
+        if kind == 'licences':
+            return self.licence_data(request)
         if kind == 'diplomacy':
             return self.diplomacy_data(request)
         if kind == 'relations':
@@ -583,6 +596,7 @@ class Editor:
         elif kind == 'blueprints':
             ids = self.owned | {k for k,v in self.game.wares.items() if v.get('blueprint')}
             rows = [{'id':k,'name':self.game.name(k),'group':self.game.wares.get(k,{}).get('group','其他'),'owned':k in self.owned} for k in ids if k]
+            blueprint_groups = sorted({r['group'] for r in rows})
             if request.get('ownership') == 'missing':
                 rows = [r for r in rows if not r['owned']]
             elif request.get('ownership') == 'owned':
@@ -606,6 +620,8 @@ class Editor:
         result = {'rows':rows[page*100:(page+1)*100],'total':len(rows),'page':page}
         if kind == 'relations':
             result['internalCount'] = hidden
+        elif kind == 'blueprints':
+            result['groups'] = blueprint_groups
         return result
 
     def plan(self, commands):
@@ -623,10 +639,13 @@ class Editor:
         cargo_changes = {}
         stock_changes = {}
         inventory_changes = {}
+        management_changes = []
         missing_relations = {}
         for c in unique.values():
             kind = c.get('kind')
-            if kind == 'money':
+            if kind in ('mod_value','research','licence','workforce'):
+                management_changes.append(c)
+            elif kind == 'money':
                 amount = integer(c['value'],0,999999999999999)
                 nodes = self.members.get('money',[])
                 if not nodes:
@@ -834,6 +853,7 @@ class Editor:
             if additions:
                 xml = ''.join(additions)
                 plan.add(inventory or holder,xml if inventory else element('inventory',children=xml))
+        self.plan_management(plan,management_changes)
         return plan
 
 

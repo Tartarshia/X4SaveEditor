@@ -184,9 +184,9 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             with path.open('rb') as f:
                 shutil.copyfileobj(f, self.wfile, 1024*1024)
-        elif parsed.path in ('/', '/app.js', '/features.js', '/style.css'):
-            name = {'/': 'index.html', '/app.js': 'app.js', '/features.js': 'features.js', '/style.css': 'style.css'}[parsed.path]
-            mime = {'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'features.js': 'text/javascript; charset=utf-8', 'style.css': 'text/css; charset=utf-8'}[name]
+        elif parsed.path in ('/', '/app.js', '/features.js', '/management.js', '/style.css'):
+            name = {'/': 'index.html', '/app.js': 'app.js', '/features.js': 'features.js', '/management.js':'management.js', '/style.css': 'style.css'}[parsed.path]
+            mime = {'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript; charset=utf-8', 'features.js': 'text/javascript; charset=utf-8', 'management.js':'text/javascript; charset=utf-8', 'style.css': 'text/css; charset=utf-8'}[name]
             self.send_bytes((ROOT / 'web' / name).read_bytes(), mime)
         else:
             self.json({'error': 'Not found'}, 404)

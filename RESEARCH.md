@@ -37,3 +37,15 @@
 ## 外交与特工数据边界
 
 [Egosoft 8.00 更新说明](https://www.egosoft.com/news/archive/2025September_en.php)将 Diplomacy 列为免费基础游戏更新，Envoy Pack 是同期推出的 DLC；[开发说明](https://m.egosoft.com/news/archive/2025July_en.php)提到势力外交及谈判、谍报特工。实现依据本机 9.00 游戏脚本与存档核对字段，不复制或分发游戏资源。玩家的 `diplomacy` 节点保存 `influence` 与已登记特工的组件引用；对应 NPC 的黑板分别保存 `$diplomacy_exp_negotiation` 和 `$diplomacy_exp_espionage`。本机脚本按经验 0、10、20、50、100、200 的门槛计算 0–5 级，存档没有独立等级字段；经验在 200 后仍可累积，未查到硬上限。影响力的最高显示档位从 33 起，本机脚本存在单次授予 300 的调试操作，但没有找到余额的绝对上限。因此编辑器人为限制影响力写入 300、单项经验写入 200，防止无意义的巨大值；这些不是游戏数据类型的硬上限。势力对的基础值保存在双方各自的 `faction/relations/relation`；本工具设置两向相同值并清除这对势力的 `booster`，不修改玩家声望或外交事件状态。缺失的基础值仍按“游戏默认”显示，锁定及歧义记录不写入。游戏中的动态事件可再次改变这些值。
+
+## 蓝图、科研、许可证、改装与劳动力
+
+2026-10-02 核对本机基础游戏、存档声明的官方 DLC 资源和磁盘索引。蓝图候选原先只接受 `equipment`，遗漏了有制造定义的 `ship` 及带 `module` 标签的建筑；现在将三类统一处理，仍排除不可拥有蓝图标记和普通贸易物资。
+
+科研目录取自 `wares.xml` 的 `research` 定义，前置关系是 `research/research/ware`。已核对的完成记录位于玩家 `research/research`，保存 `ware` 与 `method="research"`；游戏脚本也通过 `add_research` 授予能力。工具只处理完成记录，不触发剧情脚本。总部的科研生产或建造任务仍引用某项科研时，该项及会影响它的依赖变更拒绝写入；内部或未知结构只读。
+
+许可证定义来自 `factions.xml`，包括类型、名字、最低关系与前置许可。玩家持有记录则按类型保存在玩家势力的 `licences/licence`，`factions` 是势力列表。修改按类型汇总后统一调整列表，避免两个势力的修改覆盖彼此；未涉及的势力保持原有顺序。
+
+已安装改装位于玩家舰船及其装备组的 `modification` 下，`ship`、`engine`、`shield`、`weapon` 元素将已掷出的属性直接保存为数值。主属性及可能的附加属性范围取自 `equipmentmods.xml` 的 `min/max`，按实际存档属性展示。编辑器以百分比或增加数量呈现，后端限制在资源范围内；不重新掷骰、不新增附加属性、不改变装备兼容性。质量、阻力、武器/巡航充能时间、巡航加速时间、护盾充能延迟与雷达探测修正的最优值取下限，其余已确认属性取上限。未知属性与非玩家资产保持原样。[Egosoft 舰船购买与升级指南](https://wiki.egosoft.com/X4%20Foundations%20Wiki/Manual%20and%20Guides/X4%3A%20Foundations%20Manual/Purchasing%20And%20Upgrading%20Ships/?language=en)说明改装的安装与科研条件；编辑器本身不代替这些游戏过程。
+
+空间站劳动力存于直接子节点 `workforces/workforce`，每族分别保存 `race/amount`。容量来自已实例化的居住组件 macro 的 `properties/workforce`，按种族汇总；不使用待建规划中的模块。新容器使用存档 `info/game@time` 初始化 `lasttime`，已有时间记录不改。修改人数不调整住房、食物、药品、招募或生产逻辑。

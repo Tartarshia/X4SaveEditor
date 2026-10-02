@@ -20,6 +20,10 @@ class GameData:
         self.macros = {}
         self.macro_paths = {}
         self.component_names = {}
+        self.research = {}
+        self.modifications = {}
+        self.licences = {}
+        self.races = {}
         self.version = ''
         if not self.path.is_dir():
             self.warnings.append('未找到游戏目录。设置目录后可读取货物、未拥有蓝图和中文名称。')
@@ -121,10 +125,67 @@ class GameData:
                     if component is not None and component.get('ref'):
                         self.component_names[component.get('ref').lower()] = data['name']
                     tags = set(data.get('tags', '').split())
-                    data['blueprint'] = (data.get('transport') == 'equipment' and item.find('production') is not None
+                    data['blueprint'] = ((data.get('transport') in ('equipment','ship') or 'module' in tags) and item.find('production') is not None
                                          and not tags.intersection({'noblueprint', 'noplayerblueprint'}))
+                    if data.get('transport') == 'ship':
+                        data['group'] = 'ships'
+                    elif 'module' in tags:
+                        data['group'] = 'modules'
                     data['volume'] = float(data.get('volume', '1'))
+                    research = item.find('research')
+                    if data.get('transport') == 'research' and research is not None:
+                        self.research[identity] = {'id':identity,'name':data['name'],
+                            'description':self.translate(data.get('description','')),
+                            'prerequisites':[w.get('ware') for w in research.findall('research/ware') if w.get('ware')],
+                            'time':float(research.get('time',0)),'tags':data.get('tags',''),
+                            'hidden':'hidden' in tags,'mission':'missiononly' in tags}
+                elif tag == 'faction':
+                    self.licences[identity] = {n.get('type'):{**n.attrib,'name':self.translate(n.get('name'))}
+                        for n in item.findall('licences/licence') if n.get('type') and n.get('name')}
                 output[identity] = data
+        mods = self.library('libraries/equipmentmods.xml')
+        if mods is not None:
+            for category in mods:
+                for mod in category:
+                    wid = mod.get('ware')
+                    if not wid:
+                        continue
+                    fields = {}
+                    for field in [mod,*[f for bonus in mod.findall('bonus') for f in bonus]]:
+                        if field.get('min') is None or field.get('max') is None:
+                            continue
+                        low,high = float(field.get('min')),float(field.get('max'))
+                        fields[field.tag] = {'min':low,'max':high}
+                    self.modifications[(category.tag,wid)] = {'quality':int(mod.get('quality',0)),
+                                                             'primary':mod.tag,'fields':fields}
+        races = self.library('libraries/races.xml')
+        if races is not None:
+            self.races = {n.get('id'):self.translate(n.get('name',n.get('id','')))
+                          for n in races.findall('race') if n.get('id')}
+
+    def library(self, path):
+        merged = None
+        for layer in self.layers:
+            if path not in layer:
+                continue
+            tree = self.read(layer[path])
+            if tree.tag != 'diff':
+                merged = tree
+            elif merged is not None:
+                self.patch(merged,tree,path)
+        return merged
+
+    @lru_cache(maxsize=4096)
+    def habitation(self, macro):
+        path = self.macro_paths.get(macro.lower())
+        root = self.library(path) if path else None
+        if root is None:
+            return None
+        model = next((n for n in root.iter('macro') if n.get('name','').lower()==macro.lower()),None)
+        workforce = model.find('properties/workforce') if model is not None else None
+        if workforce is None or not workforce.get('race') or not workforce.get('capacity'):
+            return None
+        return {'race':workforce.get('race'),'capacity':int(workforce.get('capacity'))}
 
     @staticmethod
     def read(entry):
