@@ -1,8 +1,16 @@
 # X4 存档修改器
 
+## TL;DR
+
+- **这是一个本地中文网页版 X4 存档修改器**，支持金钱、声望与许可证、蓝图、总部科研、飞船改装、货物、特殊物品、船员技能、空间站资源与劳动力，以及外交与特工。
+- **开始使用**：从 [最新 Release](https://github.com/Tartarshia/X4SaveEditor/releases/latest) 下载源码 ZIP，解压，安装 Python 3.11+，双击 `启动X4存档修改器.cmd`。不需要安装额外 Python 包。
+- **操作流程**：打开存档 → 修改目标值 → 顶部统一暂存 → 导出新存档。功能项旁的“查看原始 XML”可直达对应存档结构。
+- **原存档不会被覆盖**；游戏名称、蓝图和属性范围从本机 X4 安装目录读取。服务只监听本机，不上传存档。
+- **加载游戏前备份存档槽位**。导出有完整 XML 校验，但游戏内效果仍需验证。
+
 本地中文存档修改器，提供金钱、空间站资源与劳动力、总部科研、玩家声望与许可证、外交与特工、已安装飞船改装、飞船货仓、特殊物品、蓝图和船员技能面板，同时保留大型存档的完整索引与高级结构浏览。
 
-当前正式版为 [v1.1.0](https://github.com/Tartarshia/X4SaveEditor/releases/tag/v1.1.0)，新增特殊物品管理、喷漆与改装分类以及物品删除。网页版是默认入口；[v1.0.1](https://github.com/Tartarshia/X4SaveEditor/releases/tag/v1.0.1) 保留货仓修正版，[v1.0.0](https://github.com/Tartarshia/X4SaveEditor/releases/tag/v1.0.0) 保留首次网页版发布，[v0.1.0](https://github.com/Tartarshia/X4SaveEditor/releases/tag/v0.1.0) 保留桌面第一版。
+当前正式版为 [v1.2.0](https://github.com/Tartarshia/X4SaveEditor/releases/tag/v1.2.0)，新增已安装飞船改装、总部科研、势力许可证、空间站劳动力、完整蓝图目录和原始 XML 定位。网页版是默认入口；[v1.1.0](https://github.com/Tartarshia/X4SaveEditor/releases/tag/v1.1.0) 保留特殊物品管理版，[v1.0.1](https://github.com/Tartarshia/X4SaveEditor/releases/tag/v1.0.1) 保留货仓修正版，[v1.0.0](https://github.com/Tartarshia/X4SaveEditor/releases/tag/v1.0.0) 保留首次网页版发布，[v0.1.0](https://github.com/Tartarshia/X4SaveEditor/releases/tag/v0.1.0) 保留桌面第一版。
 
 双击 `启动X4存档修改器.cmd` 或 `start.cmd`，自动在默认浏览器打开 **http://127.0.0.1:8765**。需要 Python 3.11 或更新版本，应用后端仅使用 Python 标准库，前端无框架、CDN 或外部服务依赖。
 

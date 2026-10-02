@@ -130,7 +130,7 @@ function renderAttributes() {
       else advancedDrafts.set(id,{node,key,original,value:input.value});
       row.classList.toggle('changed',advancedDrafts.has(id)||changes.has(id));updateDraftCount();
     };
-    row.append(label,input,button('查看原始 XML',()=>openOriginalNode(node),'xml-link')); container.append(row);
+    row.append(label,input); container.append(row);
   }
   if (!Object.keys(attributes).length) { const p=document.createElement('p'); p.className='muted'; p.textContent='此节点没有属性，可进入子节点继续浏览。'; container.append(p); }
 }
