@@ -66,6 +66,7 @@ async function loadGameplay(){
   await renderFeature();
 }
 function table(headers){const wrap=el('div',undefined,'feature-table');const t=el('table');const head=el('thead');const tr=el('tr');for(const h of headers)tr.append(el('th',h));head.append(tr);const body=el('tbody');t.append(head,body);wrap.append(t);return {wrap,body};}
+function shipLabel(ship){return `${ship.name} · ${ship.code} · ${ship.type}${ship.model!==ship.name?` · ${ship.model}`:''}`;}
 function shipPicker(parent,allowAll=false){
   const region=el('select');region.id='featureSector';region.setAttribute('aria-label','筛选星区');region.dataset.work='';
   const all=el('option','全部星区');all.value='';region.append(all);
@@ -76,7 +77,7 @@ function shipPicker(parent,allowAll=false){
   region.value=selectedSector;
   region.onchange=work(async()=>{selectedSector=region.value;selectedShip='';shipSearch='';featurePage=0;await renderFeature();});
   const select=el('select');select.id='featureShip';select.setAttribute('aria-label','选择飞船');select.dataset.work='';
-  const search=el('input');search.placeholder='筛选飞船名称 / 识别码';search.setAttribute('aria-label','筛选飞船');search.dataset.work='';search.value=shipSearch;
+  const search=el('input');search.placeholder='筛选名称 / 识别码 / 船型 / 型号';search.setAttribute('aria-label','筛选飞船');search.dataset.work='';search.value=shipSearch;
   const fill=()=>{
     select.replaceChildren();
     const placeholder=el('option',allowAll?(selectedSector?'此星区全部玩家人员（含空间站）':'全部玩家人员（含空间站和未分配人员）'):'选择一艘玩家飞船');placeholder.value='';select.append(placeholder);
@@ -84,8 +85,8 @@ function shipPicker(parent,allowAll=false){
       if(selectedSector&&sector.id!==selectedSector)continue;
       const group=el('optgroup');group.label=sector.name;
       for(const ship of gameHome.ships.filter(s=>s.sector.id===sector.id)){
-        if(!(`${ship.name} ${ship.code}`.toLowerCase().includes(search.value.toLowerCase()))&&String(ship.id)!==String(selectedShip))continue;
-        const option=el('option',`${ship.id===gameHome.current?'当前飞船 · ':''}${ship.name} ${ship.code}`);option.value=ship.id;group.append(option);
+        if(!(`${ship.name} ${ship.code} ${ship.type} ${ship.model}`.toLowerCase().includes(search.value.toLowerCase()))&&String(ship.id)!==String(selectedShip))continue;
+        const option=el('option',`${ship.id===gameHome.current?'当前飞船 · ':''}${shipLabel(ship)}`);option.value=ship.id;group.append(option);
       }
       if(group.children.length)select.append(group);
     }
@@ -312,9 +313,9 @@ async function renderStationResources(parent){
     const filter=el('input');filter.placeholder='筛选物资名称 / ID';filter.setAttribute('aria-label',`${title}筛选物资`);section.append(filter);
     const t=table(['物资 / ID','当前总量','目标总量','单件体积','分布货仓']);
     for(const w of [...rows.values()].sort((a,b)=>a.name.localeCompare(b.name)||a.id.localeCompare(b.id))){
-      const tr=el('tr');cell(tr,`${w.name}\n${w.id}`).className='named-cell';cell(tr,fmt(w.amount));
+      const tr=el('tr');cell(tr,`${w.name}\n${w.id}${w.editable===false?' · 非库存物资，只读':''}`).className='named-cell';cell(tr,fmt(w.amount));
       const make=value=>({kind,id:data.station,storage:w.id,value,original:w.amount,label:`${current.name} / ${title} / ${w.name} [${w.id}]`});
-      const input=bindDraft(numberInput(currentValue(make(w.amount)),0,2147483647),make);input.setAttribute('aria-label',`${title} ${w.id} 目标总量`);input.disabled=!editable;cell(tr,'').append(input);
+      const input=bindDraft(numberInput(currentValue(make(w.amount)),0,2147483647),make);input.setAttribute('aria-label',`${title} ${w.id} 目标总量`);input.disabled=!editable||w.editable===false;cell(tr,'').append(input);
       cell(tr,w.volume===undefined?'未知':`${fmt(w.volume)} m³`);cell(tr,fmt(w.locations));
       if(commands.has(commandKey(make(w.amount)))||drafts.has(commandKey(make(w.amount))))tr.classList.add('pending');
       t.body.append(tr);
@@ -353,6 +354,8 @@ async function renderCargo(parent){
   const bar=el('div',undefined,'feature-toolbar');shipPicker(bar);parent.append(bar);
   if(!selectedShip){parent.append(el('p',gameHome.ships.length?'请在上方选择飞船，可先按星区和名称缩小范围。':'没有可用的玩家飞船。'));return;}
   const data=await job('gameplay',{kind:'cargo',ship:selectedShip,gamePath:gamePathValue});
+  const currentShip=gameHome.ships.find(ship=>String(ship.id)===String(selectedShip));
+  if(currentShip)parent.append(el('p',shipLabel(currentShip),'resource-station-title'));
   parent.append(el('p','选择货物并输入目标总数量；0 表示移除。多个修改会合并校验总体积，不能超过货仓容量。','muted'));
   for(const storage of data.storages){
     const box=el('section',undefined,'cargo-box');const used=storage.items.reduce((v,w)=>v+(w.volume??0)*w.amount,0);

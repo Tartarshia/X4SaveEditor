@@ -185,6 +185,17 @@ class Editor:
             return '未分配资产'
         return a['name'] if a.get('name','').strip() else self.game.model_name(a.get('macro',''))
 
+    def ship_description(self,n):
+        if n not in self.ships:
+            return self.asset_name(n)
+        a = self.ships[n]
+        name = self.asset_name(n)
+        model = self.game.model_name(a.get('macro',''))
+        parts = [name,a.get('code') or a.get('id') or f'#{n}',self.game.ship_type(a.get('macro',''),a.get('class',''))]
+        if model != name:
+            parts.append(model)
+        return ' · '.join(parts)
+
     def add_crew(self,n,asset,anonymous):
         a = self.attrs(n)
         parent = n if anonymous else self.first(n,'traits')
@@ -192,7 +203,7 @@ class Editor:
         role = a.get('role','') if anonymous else self.attrs(self.first(n,'entity')).get('post','officer')
         roles = {'service':'勤务船员','marine':'陆战队员','aipilot':'船长 / 驾驶员','manager':'经理','officer':'人员'}
         self.crew[n] = {'id':n,'name':a.get('name') or roles.get(role,role) or '船员','role':roles.get(role,role),
-                        'asset':asset,'ship':self.asset_name(asset),'sector':self.sector(n),'skills':{k:int(self.attrs(skill).get(k,0)) for k in SKILLS},
+                        'asset':asset,'ship':self.ship_description(asset),'sector':self.sector(n),'skills':{k:int(self.attrs(skill).get(k,0)) for k in SKILLS},
                         'skill_node':skill,'parent':parent,'anonymous':anonymous}
 
     def relation_rows(self):
@@ -387,7 +398,8 @@ class Editor:
                 for item in storage['items']:
                     row = summary.setdefault(item['id'],{'id':item['id'],'name':item['name'],'amount':0,
                                                          'transport':self.game.wares.get(item['id'],{}).get('transport'),
-                                                         'volume':item['volume'],'locations':0})
+                                                         'volume':item['volume'],'locations':0,
+                                                         'editable':self.game.cargo_ware(self.game.wares.get(item['id'],{}))})
                     row['amount'] += item['amount']
                     row['locations'] += 1
             return sorted(summary.values(),key=lambda r:(r['name'],r['id']))
@@ -397,7 +409,7 @@ class Editor:
                 'constructionReason':construction['reason'] if not build_root else '',
                 'production':[{'macro':k,'name':self.game.model_name(k),'count':v} for k,v in sorted(production.items())],
                 'wares':[{'id':k,'name':v['name'],'volume':v['volume'],'transport':v.get('transport')}
-                         for k,v in self.game.wares.items() if v.get('transport') in ('container','solid','liquid') and v['volume']>0]}
+                         for k,v in self.game.wares.items() if self.game.cargo_ware(v)]}
 
     def plan_station_stock(self, plan, station, build, updates):
         if station not in self.station_accounts:
@@ -425,7 +437,7 @@ class Editor:
             return sum(self.game.wares[wid]['volume']*amount for wid,amount in amounts[index].items())
         for wid,target in updates.items():
             ware = self.game.wares.get(wid)
-            if not ware or ware.get('transport') not in ('container','solid','liquid') or ware['volume']<=0:
+            if not ware or not self.game.cargo_ware(ware):
                 raise ValueError('不是本机已识别的可存储物资：' + wid)
         # Free space first so several edits are checked against their combined final state.
         for wid,target in updates.items():
@@ -480,7 +492,10 @@ class Editor:
             money = next((self.attrs(n).get('amount') for n in self.members.get('money',[]) if 'amount' in self.attrs(n)),None)
             if money is None:
                 money = next((self.attrs(n).get('money') for n in self.members.get('money',[]) if 'money' in self.attrs(n)),None)
-            ships = [{'id':n,'name':self.asset_name(n),'code':a.get('code',''),'sector':self.sector(n)} for n,a in self.ships.items()]
+            ships = [{'id':n,'name':self.asset_name(n),'code':a.get('code') or a.get('id') or f'#{n}',
+                      'model':self.game.model_name(a.get('macro','')),
+                      'type':self.game.ship_type(a.get('macro',''),a.get('class','')),
+                      'sector':self.sector(n)} for n,a in self.ships.items()]
             sectors = {}
             for category, entries in [('ships',ships),('crew',self.crew.values())]:
                 for row in entries:
@@ -523,7 +538,8 @@ class Editor:
                 rows = [r for r in rows if r['asset'] == int(request['ship'])]
         elif kind == 'cargo':
             return {'storages':self.cargo(int(request.get('ship') or self.current or 0)),
-                    'wares':[{'id':k,'name':v['name'],'volume':v['volume'],'transport':v.get('transport')} for k,v in self.game.wares.items() if v.get('transport') in ('container','solid','liquid') and v['volume']>0]}
+                    'wares':[{'id':k,'name':v['name'],'volume':v['volume'],'transport':v.get('transport')}
+                             for k,v in self.game.wares.items() if self.game.cargo_ware(v)]}
         else:
             raise ValueError('未知功能面板')
         rows = [r for r in rows if query in ' '.join(str(r.get(k,'')) for k in ('name','id','role','ship')).lower()]
@@ -705,6 +721,8 @@ class Editor:
                 if not amount:
                     continue
                 ware = self.game.wares.get(wid)
+                if wid not in current and (not ware or not self.game.cargo_ware(ware)):
+                    raise ValueError('此项目不是可加入飞船货仓的货物：' + wid)
                 if not ware or ware.get('transport') not in data['types'] or ware['volume']<=0:
                     raise ValueError('无法确认货物体积或不兼容此货仓：' + wid)
                 volume += ware['volume'] * amount

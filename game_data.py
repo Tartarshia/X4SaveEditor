@@ -227,6 +227,76 @@ class GameData:
                     return self.translate(identification.get('name'))
         return self.component_names.get(key) or (f'未知型号（{macro}）' if macro else '未知型号')
 
+    @lru_cache(maxsize=1)
+    def ship_roles(self):
+        """Map ship macros to roles declared by the installed game's ship groups."""
+        resources = {}
+        for name in ('libraries/ships.xml', 'libraries/shipgroups.xml'):
+            merged = None
+            for layer in self.layers:
+                if name not in layer:
+                    continue
+                tree = self.read(layer[name])
+                if tree.tag != 'diff':
+                    if merged is None:
+                        merged = tree
+                    else:
+                        key = 'id' if name == 'libraries/ships.xml' else 'name'
+                        existing = {item.get(key):item for item in merged}
+                        for item in tree:
+                            previous = existing.get(item.get(key))
+                            if previous is None:
+                                merged.append(item)
+                            elif key == 'name':
+                                previous.extend(list(item))
+                            else:
+                                merged.remove(previous)
+                                merged.append(item)
+                elif merged is not None:
+                    self.patch(merged,tree,name)
+            resources[name] = merged
+        ships,groups = resources.values()
+        if ships is None or groups is None:
+            return {}
+        labels = {'carrier':'航母','battleship':'战列舰','destroyer':'驱逐舰','frigate':'护卫舰',
+                  'gunboat':'炮艇','corvette':'轻型护卫舰','fighter':'战斗机','scout':'侦察机',
+                  'resupplier':'补给舰','builder':'建造舰','miner':'采矿船','trader':'运输船',
+                  'tug':'拖船','terraformer':'地貌改造船','plunderer':'掠夺船'}
+        by_group = {}
+        for ship in ships.findall('ship'):
+            category = ship.find('category')
+            tags = set(category.get('tags','').strip('[]').replace(',',' ').split()) if category is not None else set()
+            role = next((label for tag,label in labels.items() if tag in tags),'')
+            if role and ship.get('group'):
+                by_group.setdefault(ship.get('group'),set()).add(role)
+        result = {}
+        for group in groups.findall('group'):
+            roles = by_group.get(group.get('name'),set())
+            if len(roles) != 1:
+                continue
+            role = next(iter(roles))
+            for item in group.findall('select'):
+                if item.get('macro'):
+                    result.setdefault(item.get('macro').lower(),set()).add(role)
+        return {macro:next(iter(roles)) for macro,roles in result.items() if len(roles)==1}
+
+    def ship_type(self, macro, ship_class):
+        size = ship_class.removeprefix('ship_').upper() if ship_class.startswith('ship_') else ''
+        role = self.ship_roles().get(macro.lower(),'') if macro else ''
+        if not role:
+            parts = macro.lower().split('_')
+            if len(parts)>3 and parts[0]=='ship':
+                role = {'battleship':'战列舰','carrier':'航母','destroyer':'驱逐舰','frigate':'护卫舰',
+                        'corvette':'轻型护卫舰','heavyfighter':'重型战斗机','fighter':'战斗机',
+                        'bomber':'轰炸机','scout':'侦察机','resupplier':'补给舰','builder':'建造舰',
+                        'miner':'采矿船','trans':'运输船','tugboat':'拖船'}.get(parts[3],'')
+        return ' · '.join(part for part in (size,role) if part) or '未知船型'
+
+    @staticmethod
+    def cargo_ware(ware):
+        return (ware.get('transport') in ('container','solid','liquid') and ware.get('volume',0)>0
+                and 'module' not in ware.get('tags','').split())
+
     @lru_cache(maxsize=4096)
     def storage(self, macro):
         if macro not in self.macros:

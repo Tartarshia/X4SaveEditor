@@ -86,9 +86,11 @@ async function navigate(mode, value, after=0, remember=true) {
   if (remember) history.push({...locationState});
   locationState=next; hasMore=data.length>200; rows=data.slice(0,200); selected=null; attributes={};
   const body=$('nodes').querySelector('tbody'); body.replaceChildren();
+  const knownShips=new Map((gameHome?.ships||[]).map(ship=>[String(ship.id),ship]));
   for (const row of rows) {
     const tr=document.createElement('tr'); tr.dataset.node=row[0]; tr.tabIndex=0;
-    [row[0],row[1],row[4],row[5]].forEach(value=>cell(tr,value));
+    const ship=knownShips.get(String(row[0]));
+    [row[0],row[1],row[4],ship?shipLabel(ship):row[5]].forEach(value=>cell(tr,value));
     tr.onclick=work(()=>busy?null:selectRow(row));
     tr.ondblclick=work(async()=>{while(busy) await delay(50); await navigate('children',row[0]);});
     tr.onkeydown=work(async e=>{if(e.key==='Enter' && !busy) await selectRow(row);});
@@ -109,7 +111,8 @@ async function selectRow(row) {
   const data=await job('details',{node:row[0]});
   selected=row; attributes=data[0];
   document.querySelectorAll('#nodes tbody tr').forEach(tr=>tr.classList.toggle('selected',tr.dataset.node===String(row[0])));
-  $('nodeTitle').textContent=`${row[1]} · #${row[0]}`;
+  const ship=gameHome?.ships.find(item=>String(item.id)===String(row[0]));
+  $('nodeTitle').textContent=ship?shipLabel(ship):`${row[1]} · #${row[0]}`;
   $('attrCount').textContent=`${Object.keys(attributes).length} 个属性`;
   $('preview').textContent=data[1]; renderAttributes();
 }

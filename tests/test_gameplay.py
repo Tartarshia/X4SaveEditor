@@ -60,11 +60,14 @@ def make_game(root):
 <ware id="ore" name="{1,1}" transport="solid" volume="10"/>
 <ware id="ice" name="{1,2}" transport="solid" volume="5"/>
 <ware id="energycells" name="Energy" transport="container" volume="1"/>
+<ware id="module_test_observation" name="Observation deck" transport="container" volume="1" tags="module"/>
 <ware id="old_engine" name="Old" transport="equipment" group="engines"><production/></ware>
 <ware id="new_engine" name="{1,3}" transport="equipment" group="engines"><production/></ware>
 <ware id="blocked" name="Blocked" transport="equipment" tags="noplayerblueprint"><production/></ware>
 </wares>''',
         'libraries/factions.xml':'<factions><faction id="argon" name="{1,4}"/></factions>',
+        'libraries/ships.xml':'<ships><ship id="test_trader" group="test_trader"><category tags="[trader, container]" size="ship_s"/></ship></ships>',
+        'libraries/shipgroups.xml':'<groups><group name="test_trader"><select macro="test_ship"/></group></groups>',
         'libraries/mapdefaults.xml':'<defaults><dataset macro="Sector_A"><properties><identification name="测试星区甲"/></properties></dataset><dataset macro="sector_b"><properties><identification name="测试星区乙"/></properties></dataset></defaults>',
         't/0001-l086.xml':'<language><page id="1"><t id="1">矿石</t><t id="2">冰</t><t id="3">测试引擎</t><t id="4">测试联邦</t><t id="5">测试运输舰</t></page></language>',
         'assets/test/macros/test_ship.xml':'<macros><macro name="test_ship"><properties><identification name="{1,5}"/></properties></macro></macros>',
@@ -223,6 +226,8 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual([(w['id'],w['amount']) for w in data['ordinaryWares']],[('ore',5)])
         self.assertEqual([(w['id'],w['amount']) for w in data['buildingWares']],[('energycells',10)])
         self.assertEqual(data['production'][0]['count'],1)
+        self.assertIn('energycells',{w['id'] for w in data['wares']})
+        self.assertNotIn('module_test_observation',{w['id'] for w in data['wares']})
         self.assertEqual({(r['kind'],r['id'],r['amount']) for r in data['ordinaryIndicators']},{('交易预留','ore',1),('记录的短缺','ice',4)})
         self.assertEqual([(r['id'],r['amount']) for r in data['buildingIndicators']],[('energycells',8)])
         self.assertEqual(self.editor.view({'kind':'station_resources','station':stations['Factory B']})['building'],[])
@@ -236,9 +241,27 @@ class GameplayTests(unittest.TestCase):
              {'kind':'station_stock','id':a,'storage':'ice','value':15}],
             [{'kind':'build_stock','id':b,'storage':'energycells','value':1}],
             [{'kind':'station_stock','id':a,'storage':'unknown','value':1}],
+            [{'kind':'station_stock','id':a,'storage':'module_test_observation','value':1}],
+            [{'kind':'build_stock','id':a,'storage':'module_test_observation','value':1}],
         ):
             with self.subTest(commands=commands),self.assertRaises(ValueError):
                 e.plan(commands).compile()
+
+    def test_existing_station_module_record_remains_visible_but_read_only(self):
+        source=self.root/'station-module.xml'
+        source.write_text(SAVE.replace('<ware ware="energycells" amount="10"/></cargo>',
+                                       '<ware ware="energycells" amount="10"/><ware ware="module_test_observation" amount="1"/></cargo>'),'utf-8')
+        folder,_=core.build_index(source,self.root/'cache')
+        editor=Editor(folder,self.root/'game')
+        try:
+            data=editor.view({'kind':'station_resources'})
+            module=next(w for w in data['buildingWares'] if w['id']=='module_test_observation')
+            self.assertEqual(module['amount'],1)
+            self.assertFalse(module['editable'])
+            editor.plan([{'kind':'build_stock','id':data['station'],'storage':'energycells','value':11}]).compile()
+            with self.assertRaises(ValueError):
+                editor.plan([{'kind':'build_stock','id':data['station'],'storage':'module_test_observation','value':2}]).compile()
+        finally:editor.close()
 
     def test_diplomacy_influence_agent_levels_and_faction_pair(self):
         self.assertEqual([agent_level(x) for x in (0,9,10,19,20,49,50,99,100,199,200,999)],
@@ -363,10 +386,33 @@ class GameplayTests(unittest.TestCase):
         ships=e.view({'kind':'home'})['ships']
         unnamed=next(s for s in ships if s['code']=='SYN-001')
         self.assertEqual(unnamed['name'],'测试运输舰')
+        self.assertEqual(unnamed['type'],'S · 运输船')
+        self.assertEqual(unnamed['model'],'测试运输舰')
         self.assertEqual(e.asset_name(e.current),'Test ship')
+        self.assertEqual(next(s for s in ships if s['name']=='Test ship')['type'],'S')
+        self.assertIn('S · 运输船',e.ship_description(unnamed['id']))
+        self.assertEqual(e.game.ship_type('ship_arg_l_destroyer_01_a_macro','ship_l'),'L · 驱逐舰')
         self.assertEqual(e.game.model_name('TEST_SHIP'),'测试运输舰')
         self.assertEqual(e.game.model_name('missing_macro'),'未知型号（missing_macro）')
         self.assertEqual(e.game.model_name(''),'未知型号')
+
+    def test_dlc_ship_group_catalogue_is_additive(self):
+        game=self.root/'game'
+        library=game/'extensions/ego_dlc_test/libraries'
+        library.mkdir(parents=True)
+        (library/'ships.xml').write_text('<ships><ship id="test_frigate" group="test_frigate"><category tags="[military, frigate]"/></ship></ships>','utf-8')
+        (library/'shipgroups.xml').write_text('<groups><group name="test_frigate"><select macro="dlc_frigate_macro"/></group></groups>','utf-8')
+        data=GameData(game,('ego_dlc_test',))
+        self.assertEqual(data.ship_type('test_ship','ship_s'),'S · 运输船')
+        self.assertEqual(data.ship_type('dlc_frigate_macro','ship_m'),'M · 护卫舰')
+
+    def test_ship_cargo_excludes_station_modules(self):
+        e=self.editor
+        self.assertIn('energycells',{w['id'] for w in e.view({'kind':'cargo','ship':e.current})['wares']})
+        self.assertNotIn('module_test_observation',{w['id'] for w in e.view({'kind':'cargo','ship':e.current})['wares']})
+        storage=e.cargo(e.current)[0]['id']
+        with self.assertRaisesRegex(ValueError,'不是可加入飞船货仓的货物'):
+            e.plan([{'kind':'cargo','ship':e.current,'storage':storage,'id':'module_test_observation','value':1}]).compile()
 
     def test_model_name_official_patch_and_ware_fallback(self):
         game=self.root/'game'
