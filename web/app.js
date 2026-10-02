@@ -50,7 +50,7 @@ async function openSave(path) {
   if ((changes.size || commands.size || drafts.size || advancedDrafts.size) && !confirm('打开其他存档会丢弃待修改清单和未暂存输入，继续？')) return;
   $('openDialog').close();
   const data=await job('open',{path});
-  changes.clear(); commands.clear(); drafts.clear(); advancedDrafts.clear(); updateDraftCount(); selectedShip=''; selectedSector=''; shipSearch=''; resourceStation=''; diplomacySource=''; diplomacyTarget=''; includeInternalFactions=false; featurePage=0; stationPage=0; stationSearch=''; stationSector=''; updateCount(); history=[];
+  changes.clear(); commands.clear(); drafts.clear(); advancedDrafts.clear(); sourceContext=null; updateDraftCount(); selectedShip=''; selectedSector=''; shipSearch=''; resourceStation=''; diplomacySource=''; diplomacyTarget=''; includeInternalFactions=false; featurePage=0; stationPage=0; stationSearch=''; stationSector=''; updateCount(); history=[];
   gameHome=null;
   $('featureBody').textContent='正在识别玩家账户、舰船和船员…';
   shortcutCatalog=[];
@@ -130,7 +130,7 @@ function renderAttributes() {
       else advancedDrafts.set(id,{node,key,original,value:input.value});
       row.classList.toggle('changed',advancedDrafts.has(id)||changes.has(id));updateDraftCount();
     };
-    row.append(label,input); container.append(row);
+    row.append(label,input,button('查看原始 XML',()=>openOriginalNode(node),'xml-link')); container.append(row);
   }
   if (!Object.keys(attributes).length) { const p=document.createElement('p'); p.className='muted'; p.textContent='此节点没有属性，可进入子节点继续浏览。'; container.append(p); }
 }
@@ -140,11 +140,12 @@ function review() {
     const tr=document.createElement('tr'); cell(tr,`#${edit.node} / ${edit.key}`); cell(tr,edit.original); cell(tr,edit.value);
     const button=document.createElement('button'); button.textContent='撤销';
     button.onclick=()=>{changes.delete(id); updateCount(); tr.remove(); renderAttributes();};
-    cell(tr,'').append(button); body.append(tr);
+    cell(tr,'').append(xmlButtonForNode(edit.node),button); body.append(tr);
   }
   appendCommandReview(body);
   if (!$('reviewDialog').open) $('reviewDialog').showModal();
 }
+function xmlButtonForNode(node){return button('查看原始 XML',async()=>{if($('reviewDialog').open)$('reviewDialog').close();await openOriginalNode(node);},'xml-link');}
 async function listSaves() {
   const paths=await api('/api/saves'); const container=$('saves'); container.replaceChildren();
   if (!paths.length) container.textContent='未发现默认目录中的存档，可输入路径或选择文件。';

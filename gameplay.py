@@ -545,10 +545,96 @@ class Editor(ManagementFeatures):
                          for wid,ware in self.game.wares.items() if ware.get('transport')=='inventory'
                          and not set(ware.get('tags','').split()).intersection({'deprecated','missiononly'})]}
 
+    def source_nodes(self, command):
+        """Locate immutable source records, including insertion parents and side effects."""
+        kind = command.get('kind')
+        identity = command.get('id')
+        nodes = []
+        def add(node, role='原始记录'):
+            if node and not any(r['id'] == node for r in nodes):
+                attrs = self.attrs(node)
+                tag = self.names[self.node(node)[1]]
+                hint = attrs.get('ware') or attrs.get('type') or attrs.get('faction') or attrs.get('race') or attrs.get('name') or ''
+                nodes.append({'id':node,'label':f'{role} · {tag} #{node}' + (f' · {hint}' if hint else '')})
+        def leaves(parent, tag, key, value, fallback):
+            matches = [n for n in self.children(parent,tag) if self.attrs(n).get(key)==value]
+            for node in matches:add(node)
+            if not matches:add(parent or fallback,'新增位置的原始父节点')
+        if kind == 'money':
+            for node in self.members.get('money',[]):add(node)
+        elif kind in ('station_money','construction_money'):
+            account = self.station_accounts.get(int(identity),{})
+            if kind == 'construction_money':account = account.get('construction',{})
+            add(account.get('node'))
+        elif kind == 'influence':add(self.diplomacy_node)
+        elif kind == 'agent_exp':
+            agent = next((a for a in self.diplomacy_agents() if a['id']==int(identity)),None)
+            if agent:
+                node = agent['nodes'].get(command.get('storage'))
+                add(node or agent['board'],'原始记录' if node else '新增位置的原始父节点')
+        elif kind in ('relation','npc_relation'):
+            source,target = ('player',str(identity)) if kind=='relation' else (str(identity),str(command.get('storage')))
+            for a,b in ((source,target),(target,source)):
+                faction = self.factions.get(a)
+                if faction:
+                    parent = self.first(faction,'relations')
+                    leaves(parent,'relation','faction',b,faction)
+                    for node in self.children(parent,'booster'):
+                        if self.attrs(node).get('faction')==b:add(node,'临时关系加成')
+        elif kind in ('blueprint','research'):
+            parent = self.first(self.player,'blueprints' if kind=='blueprint' else 'research')
+            leaves(parent,kind,'ware',str(identity),self.player)
+        elif kind == 'licence':
+            faction = self.factions.get('player')
+            if faction:leaves(self.first(faction,'licences'),'licence','type',str(command.get('storage')),faction)
+        elif kind == 'crew':
+            crew = self.crew.get(int(identity))
+            if crew:add(crew['skill_node'] or crew['parent'] or int(identity),'原始技能 / 所属节点')
+        elif kind == 'mod_value':
+            mod = self.installed_mods().get(int(identity))
+            if mod:add(mod['id'])
+        elif kind == 'workforce':
+            station = int(identity)
+            if station in self.station_accounts:
+                leaves(self.first(station,'workforces'),'workforce','race',str(command.get('storage')),station)
+        elif kind == 'inventory':
+            holder = int(command.get('storage'))
+            location = self.inventory_locations.get(holder)
+            if location:leaves(location['inventory'],'ware','ware',str(identity),holder)
+        elif kind in ('cargo','station_stock','build_stock'):
+            if kind=='cargo':
+                storages = [s for s in self.cargo(int(command.get('ship'))) if s['id']==int(command.get('storage'))]
+                ware = str(identity)
+            else:
+                station = int(identity)
+                if station not in self.station_accounts:raise ValueError('不是玩家空间站')
+                root = self.station_accounts[station]['construction']['storage'] if kind=='build_stock' else station
+                storages = self.station_storages(root)[0] if root else []
+                ware = str(command.get('storage'))
+            for storage in storages:
+                matches = [item['node'] for item in storage['items'] if item['id']==ware]
+                for node in matches:add(node)
+            if not nodes:
+                for storage in storages:add(storage['cargo'] or storage['id'],'新增位置的原始父节点')
+        else:raise ValueError('未知修改操作')
+        if not nodes:raise ValueError('此项目没有可定位的原始存档节点')
+        # Valid edits expose every affected record, including implicit prerequisites.
+        # Invalid draft values must not prevent inspecting the original source.
+        try:
+            plan = self.plan([command])
+        except (ValueError,TypeError,KeyError,OverflowError):
+            plan = None
+        if plan:
+            for node in sorted(set(plan.attrs)|set(plan.children)|plan.removed):
+                add(node,'新增位置的原始父节点' if node in plan.children else '删除前的原始记录' if node in plan.removed else '联动修改的原始记录')
+        return {'nodes':nodes}
+
     def view(self, request):
         page = max(0,int(request.get('page',0)))
         query = str(request.get('search','')).lower()
         kind = request.get('kind','home')
+        if kind == 'source_nodes':
+            return self.source_nodes(request['command'])
         if kind == 'home':
             money = next((self.attrs(n).get('amount') for n in self.members.get('money',[]) if 'amount' in self.attrs(n)),None)
             if money is None:

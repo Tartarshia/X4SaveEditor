@@ -61,7 +61,7 @@ async function renderHeadquarters(parent){
   for(const row of data.rows){const tr=el('tr');cell(tr,`${row.name}\n${row.id}${row.mission?' · 任务前置':''}`).className='named-cell';cell(tr,row.active?'正在执行':row.completed?'已完成':'未完成');
     const make=value=>({kind:'research',id:row.id,value,original:Number(row.completed),label:`总部科研：${row.name}`});
     const select=targetToggle(Number(targets.has(row.id)),`${row.id} 科研状态`,!row.editable,async value=>{queueDraft(make(value));await renderFeature();});
-    select.options[0].textContent='未完成';select.options[1].textContent='已完成';cell(tr,'').append(select);
+    select.xmlCommand=()=>make(select.value);select.options[0].textContent='未完成';select.options[1].textContent='已完成';cell(tr,'').append(select);
     cell(tr,row.prerequisites.map(id=>names.get(id)||id).join(' / ')||'无').className='named-cell';
     if(targets.has(row.id)!==row.completed)tr.classList.add('pending');if(!row.editable)tr.title=row.reason;t.body.append(tr);
   }
@@ -79,7 +79,7 @@ async function renderLicences(parent){
   const names=new Map(data.rows.map(row=>[row.id,row.name]));
   for(const row of data.rows){const tr=el('tr');cell(tr,`${row.name}\n${row.id}`).className='named-cell';cell(tr,row.owned?'持有':'未持有');
     const make=value=>({kind:'licence',id:data.faction,storage:row.id,value,original:Number(row.owned),label:`${data.name} / ${row.name}`});
-    const select=targetToggle(Number(targets.has(row.id)),`${data.faction} ${row.id} 许可证`,!row.editable,async value=>{queueDraft(make(value));await renderFeature();});select.options[0].textContent='未持有';select.options[1].textContent='持有';cell(tr,'').append(select);
+    const select=targetToggle(Number(targets.has(row.id)),`${data.faction} ${row.id} 许可证`,!row.editable,async value=>{queueDraft(make(value));await renderFeature();});select.xmlCommand=()=>make(select.value);select.options[0].textContent='未持有';select.options[1].textContent='持有';cell(tr,'').append(select);
     cell(tr,`${row.precursor?(names.get(row.precursor)||row.precursor):'无前置许可'}${row.minrelation!==undefined?' / 基础关系 '+row.minrelation:''}`).className='named-cell';
     if(targets.has(row.id)!==row.owned)tr.classList.add('pending');if(!row.editable)tr.title=row.reason;t.body.append(tr);
   }

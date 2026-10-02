@@ -28,7 +28,29 @@ function queueDraft(c){
   else drafts.set(key,c);
   updateDraftCount();
 }
-function bindDraft(input,make){input.addEventListener(input.tagName==='SELECT'?'change':'input',()=>queueDraft(make(input.value)));return input;}
+function bindDraft(input,make){input.xmlCommand=()=>make(input.value);input.addEventListener(input.tagName==='SELECT'?'change':'input',()=>queueDraft(make(input.value)));return input;}
+let sourceContext=null;
+function xmlButton(command){return button('查看原始 XML',()=>openOriginal(typeof command==='function'?command():command),'xml-link');}
+function attachSourceButtons(parent){for(const input of parent.querySelectorAll('input,select'))if(input.xmlCommand)input.after(xmlButton(input.xmlCommand));}
+async function openOriginal(command){
+  const data=await job('gameplay',{kind:'source_nodes',command,gamePath:gamePathValue});
+  const origin=feature==='advanced'?(sourceContext?.origin||'money'):feature;
+  sourceContext={origin,label:command.label||titles[command.kind]||command.kind,nodes:data.nodes};
+  if($('reviewDialog').open)$('reviewDialog').close();
+  await openOriginalNode(data.nodes[0].id);
+}
+async function openOriginalNode(node){
+  feature='advanced';showMode();await navigate('node',node);
+  if(rows.length)await selectRow(rows[0]);
+}
+function renderSourceContext(){
+  const section=$('sourceContext');section.replaceChildren();section.hidden=feature!=='advanced'||!sourceContext;
+  if(section.hidden)return;
+  section.append(el('strong',sourceContext.label),el('p','显示加载时的原始 XML。新增记录定位到原有父节点，暂存修改尚未写入这里。','muted'));
+  const links=el('div',undefined,'feature-toolbar');
+  for(const node of sourceContext.nodes)links.append(button(node.label,()=>openOriginalNode(node.id)));
+  links.append(button('返回功能页面',async()=>{feature=sourceContext.origin;await renderFeature();}));section.append(links);
+}
 async function stagePending(){
   if(!drafts.size&&!advancedDrafts.size)throw new Error('没有尚未暂存的修改');
   await stage([...drafts.values()]);drafts.clear();advancedDrafts.clear();updateDraftCount();
@@ -52,7 +74,7 @@ function appendCommandReview(body){
     const tr=el('tr');cell(tr,c.label||titles[c.kind]||c.kind);
     cell(tr,c.displayOriginal??(c.kind==='research'?(Number(c.original)?'已完成':'未完成'):c.kind==='licence'?(Number(c.original)?'持有':'未持有'):c.original??'新增'));
     cell(tr,c.displayValue??(c.kind==='blueprint'?'解锁':c.kind==='crew'?`${Number(c.value)/3} 星`:c.kind==='research'?(Number(c.value)?'完成（含前置）':'取消完成（含后续）'):c.kind==='licence'?(Number(c.value)?'授予（含前置）':'撤销（含依赖）'):c.value));
-    cell(tr,'').append(button('撤销',async()=>{commands.delete(key);updateCount();tr.remove();await renderFeature();}));body.append(tr);
+    cell(tr,'').append(xmlButton(c),button('撤销',async()=>{commands.delete(key);updateCount();tr.remove();await renderFeature();}));body.append(tr);
   }
 }
 function showMode(){
@@ -60,6 +82,7 @@ function showMode(){
   $('gameplay').hidden=advanced;$('workspace').hidden=!advanced;$('shortcutSection').hidden=!advanced;document.querySelector('.search').hidden=!advanced;
   document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===feature));
   if(!advanced)$('featureTitle').textContent=titles[feature];
+  renderSourceContext();
 }
 async function loadGameplay(){
   licenceFaction='';
@@ -103,7 +126,8 @@ function shipPicker(parent,allowAll=false){
 }
 function searchBar(parent){const bar=el('div',undefined,'feature-toolbar');const search=el('input');search.placeholder='搜索名称 / ID';search.setAttribute('aria-label','功能列表搜索');search.value=featureSearch;search.id='featureSearch';search.dataset.work='';const run=async()=>{featureSearch=search.value.trim();featurePage=0;await renderFeature();};search.onkeydown=work(e=>e.key==='Enter'?run():null);bar.append(search,button('搜索',run));parent.append(bar);return bar;}
 function pages(parent,data){const bar=el('div',undefined,'feature-toolbar');bar.append(el('span',`共 ${fmt(data.total)} 项 · 第 ${data.page+1} 页 · 每页 100 项`));if(featurePage)bar.append(button('上一页',async()=>{featurePage--;await renderFeature();}));if((featurePage+1)*100<data.total)bar.append(button('下一页',async()=>{featurePage++;await renderFeature();}));parent.append(bar);}
-async function renderFeature(){
+async function renderFeature(){await renderFeatureContent();if(feature!=='advanced')attachSourceButtons($('featureBody'));}
+async function renderFeatureContent(){
   showMode();if(feature==='advanced'||!gameHome)return;
   const parent=$('featureBody');parent.replaceChildren();
   if(feature==='money'){
@@ -162,6 +186,7 @@ async function renderFeature(){
       const relationCommand=value=>({kind:'relation',id:r.id,value,original:`${r.outgoing} / ${r.incoming}`,label:`势力关系：${r.name}`});
       const select=el('select');select.setAttribute('aria-label',`${r.id} 关系`);const placeholder=el('option','选择目标关系');placeholder.value='';select.append(placeholder);for(const [value,label] of [[-1,'完全敌对 (-1)'],[-0.1,'敌对 (-0.1)'],[0,'中立 (0)'],[0.01,'友好 (0.01)'],[0.1,'盟友 (0.1)'],[1,'最高关系 (1)']]){const o=el('option',label);o.value=value;select.append(o);}select.value=String(drafts.get(commandKey(relationCommand('')))?.value??commands.get(commandKey(relationCommand('')))?.value??'');select.disabled=r.locked;
       select.onchange=()=>{if(select.value)queueDraft(relationCommand(select.value));else{drafts.delete(commandKey(relationCommand('')));updateDraftCount();}};cell(tr,'').append(select);
+      select.xmlCommand=()=>relationCommand(select.value);
       if(r.locked)cell(tr,'游戏锁定');
     }else{
       const pick=el('input');pick.type='checkbox';pick.setAttribute('aria-label',`选择 ${r.name}`);pick.dataset.pick=r.id;
@@ -169,6 +194,7 @@ async function renderFeature(){
       if(!pick.disabled)pick.onchange=()=>{if(pick.checked)selected.add(r.id);else selected.delete(r.id);if(feature==='blueprints'){const c={kind:'blueprint',id:r.id,label:`蓝图：${r.name} [${r.id}]`};if(pick.checked)queueDraft(c);else{drafts.delete(commandKey(c));updateDraftCount();}}};else pick.removeAttribute('data-pick');
       if(feature==='blueprints'&&drafts.has(`blueprint:${r.id}::`)){pick.checked=true;selected.add(r.id);}
       cell(tr,'').append(pick);
+      if(feature==='blueprints')pick.xmlCommand=()=>({kind:'blueprint',id:r.id,label:`蓝图：${r.name} [${r.id}]`});
       if(feature==='blueprints'){cell(tr,`${r.name}\n${r.id}`).className='named-cell';cell(tr,groups[r.group]||r.group);cell(tr,r.owned?'已拥有':commands.has(`blueprint:${r.id}::`)?'待解锁':'未拥有');}
       else{
         cell(tr,`${r.name}\n${r.role} · #${r.id}`).className='named-cell';cell(tr,r.sector.name);cell(tr,r.ship);
@@ -214,6 +240,7 @@ async function renderDiplomacy(parent){
       original:`${pair.forward.base??'默认'} / ${pair.reverse.base??'默认'}`,label:`势力关系：${first.name} ↔ ${second.name}`});
     const key=commandKey(make(''));
     const input=numberInput(drafts.get(key)?.value??commands.get(key)?.value??'',-1,1);input.step='0.01';
+    input.xmlCommand=()=>make(input.value);
     input.placeholder='输入 -1 至 1';input.setAttribute('aria-label','势力间目标关系');input.disabled=!pair.editable;
     input.oninput=()=>{if(input.value===''){drafts.delete(key);updateDraftCount();}else queueDraft(make(input.value));};
     const control=el('label','目标基础关系（双方）');control.append(input);section.append(control);
