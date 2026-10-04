@@ -14,6 +14,7 @@ let gamePathValue='';
 try { gamePathValue=localStorage.getItem('x4-game-path')||''; } catch {}
 const titles={money:'玩家金钱',station_resources:'空间站资源',hq:'总部 / 科研',ship_mods:'已安装飞船改装',relations:'势力关系',diplomacy:'外交与特工',cargo:'飞船货仓',inventory:'特殊物品',blueprints:'解锁蓝图',crew:'船员技能',ammunition:'弹药与部署物',ship_service:'飞船维护与换装',crew_roster:'船员数量与岗位',map:'星区地图',encyclopedia:'百科解锁'};
 const skillNames={all:'全部五项技能',piloting:'驾驶',management:'管理',engineering:'工程',boarding:'登舰',morale:'士气'};
+titles.assets='资产详情';
 const groups={ships:'舰船',engines:'引擎',shields:'护盾',weapons:'武器',turrets:'炮塔',missiles:'导弹',drones:'无人机',countermeasures:'干扰弹',deployables:'部署物',modules:'空间站模块'};
 function el(tag,text,cls){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;}
 function button(text,fn,cls=''){const b=el('button',text,cls);b.dataset.work='';b.onclick=work(fn);return b;}
@@ -131,6 +132,7 @@ async function renderFeature(){await renderFeatureContent();if(feature!=='advanc
 async function renderFeatureContent(){
   showMode();if(feature==='advanced'||!gameHome)return;
   const parent=$('featureBody');parent.replaceChildren();
+  if(feature==='assets'){await renderAssets(parent);return;}
   if(feature==='money'){
     const moneyCommand=value=>({kind:'money',value,original:gameHome.money,label:'玩家金钱（同步共享账户）'});
     const saved=commands.get('money:::');parent.append(el('p','玩家可用资金','muted'),el('div',`${fmt(gameHome.money||0)} Cr`,'money-value'));
@@ -282,20 +284,20 @@ async function renderDiplomacy(parent){
   }
   agents.append(t.wrap);
 }
-async function renderStationMoney(parent){
+async function renderStationMoney(parent,asset=''){
   const section=el('section',undefined,'station-money');
-  section.append(el('h3',`玩家空间站资金 · ${fmt(gameHome.stationCount)} 座`),
+  section.append(el('h3',asset?'资产资金':`玩家空间站资金 · ${fmt(gameHome.stationCount)} 座`),
                  el('p','空间站账户和建造仓储账户分别修改。余额为 0 的账户可能在存档中省略 amount，暂存时会补入。','muted'),
                  el('p','预算栏显示存档账户的 min / max 区间；“未保存”表示存档没有这两个值，游戏内建议预算可能会动态计算。','muted'));
   const bar=el('div',undefined,'feature-toolbar');
   const search=el('input');search.id='stationSearch';search.placeholder='搜索空间站名称 / 识别码 / 星区';search.setAttribute('aria-label','搜索空间站');search.dataset.work='';search.value=stationSearch;
   const filter=async()=>{stationSearch=search.value.trim();stationPage=0;await renderFeature();};
   search.onkeydown=work(e=>e.key==='Enter'?filter():null);bar.append(search,button('搜索空间站',filter));
-  const data=await job('gameplay',{kind:'station_money',search:stationSearch,sector:stationSector,page:stationPage,gamePath:gamePathValue});
+  const data=await job('gameplay',{kind:'station_money',station:asset,search:asset?'':stationSearch,sector:asset?'':stationSector,page:asset?0:stationPage,gamePath:gamePathValue});
   const sector=el('select');sector.id='stationSector';sector.setAttribute('aria-label','筛选空间站星区');sector.dataset.work='';
   const all=el('option','全部星区');all.value='';sector.append(all);
   for(const item of data.sectors){const option=el('option',item.name);option.value=item.id;sector.append(option);}
-  sector.value=stationSector;sector.onchange=work(async()=>{stationSector=sector.value;stationPage=0;await renderFeature();});bar.append(sector);section.append(bar);
+  sector.value=stationSector;sector.onchange=work(async()=>{stationSector=sector.value;stationPage=0;await renderFeature();});bar.append(sector);if(!asset)section.append(bar);
   const budget=account=>account.min===null&&account.max===null?'未保存':`${account.min===null?'—':fmt(account.min)} / ${account.max===null?'—':fmt(account.max)} Cr`;
   const t=table(['空间站','星区','空间站资金','建造资金','存档预算区间（站 / 建造）']);
   for(const row of data.rows){
@@ -320,11 +322,11 @@ async function renderStationMoney(parent){
     t.body.append(tr);
   }
   section.append(t.wrap,el('p',`匹配 ${fmt(data.total)} 座空间站 · 第 ${data.page+1} 页`,'muted'));
-  if(stationPage)section.append(button('上一页',async()=>{stationPage--;await renderFeature();}));
-  if((stationPage+1)*100<data.total)section.append(button('下一页',async()=>{stationPage++;await renderFeature();}));
+  if(!asset&&stationPage)section.append(button('上一页',async()=>{stationPage--;await renderFeature();}));
+  if(!asset&&(stationPage+1)*100<data.total)section.append(button('下一页',async()=>{stationPage++;await renderFeature();}));
   parent.append(section);
 }
-async function renderStationResources(parent){
+async function renderStationResources(parent,embedded=false){
   const data=await job('gameplay',{kind:'station_resources',station:resourceStation,gamePath:gamePathValue});
   resourceStation=String(data.station);
   const current=data.stations.find(s=>String(s.id)===resourceStation);
@@ -345,11 +347,11 @@ async function renderStationResources(parent){
     picker.value=resourceStation;
   };
   search.oninput=fill;sector.onchange=fill;picker.onchange=work(async()=>{resourceStation=picker.value;await renderFeature();});fill();
-  pickerBar.append(search,sector,picker);parent.append(pickerBar);
+  pickerBar.append(search,sector,picker);if(!embedded)parent.append(pickerBar);
   if(!current){parent.append(el('p','没有玩家空间站。','empty'));return;}
   parent.append(el('p',`${current.name}${current.code?' · '+current.code:''}　|　${current.sector.name}`,'resource-station-title'),
                 el('p','按物资汇总空间站实体货仓；建造仓储独立列出。修改的是库存总量，暂存时按货仓类型、单件体积和剩余容量分配到实体货仓。经理的自动配额、交易订单和生产逻辑不会随库存一同修改。','muted'));
-  renderWorkforce(parent,data,current);
+  if(!embedded)renderWorkforce(parent,data,current);
   const renderGroup=(title,kind,storages,listed,indicators,reason='')=>{
     const section=el('section',undefined,'resource-group');
     section.append(el('h3',`${title} · ${storages.length} 个货仓 · ${listed.length} 种现有物资`));
@@ -404,11 +406,11 @@ async function renderStationResources(parent){
   if(data.production.length){const t=table(['模块名称','数量','macro']);for(const p of data.production){const tr=el('tr');cell(tr,p.name);cell(tr,fmt(p.count));cell(tr,p.macro);t.body.append(tr);}production.append(t.wrap);}
   else production.append(el('p','没有识别到生产模块。','muted'));
   parent.append(production);
-  await renderStationSettings(parent,data.station);
+  if(!embedded)await renderStationSettings(parent,data.station);
 }
 function starSelect(value){const s=el('select');s.dataset.work='';for(let i=0;i<=15;i++){const o=el('option',`${Number((i/3).toFixed(2))} 星`);o.value=i;s.append(o);}s.value=String(value);return s;}
-async function renderCargo(parent){
-  const bar=el('div',undefined,'feature-toolbar');shipPicker(bar);parent.append(bar);
+async function renderCargo(parent,embedded=false){
+  if(!embedded){const bar=el('div',undefined,'feature-toolbar');shipPicker(bar);parent.append(bar);}
   if(!selectedShip){parent.append(el('p',gameHome.ships.length?'请在上方选择飞船，可先按星区和名称缩小范围。':'没有可用的玩家飞船。'));return;}
   const data=await job('gameplay',{kind:'cargo',ship:selectedShip,gamePath:gamePathValue});
   const currentShip=gameHome.ships.find(ship=>String(ship.id)===String(selectedShip));
@@ -435,8 +437,8 @@ async function renderCargo(parent){
   if(!data.storages.length)parent.append(el('p','未找到这艘船的货物仓储组件。弹药和个人背包不属于货仓。','hint'));
 }
 document.querySelectorAll('[data-tab]').forEach(b=>{b.dataset.work='';b.onclick=work(async()=>{feature=b.dataset.tab;featurePage=0;featureSearch='';await renderFeature();});});
-async function renderInventory(parent){
-  const data=await job('gameplay',{kind:'inventory',holder:inventoryHolder,gamePath:gamePathValue});
+async function renderInventory(parent,asset=''){
+  const data=await job('gameplay',{kind:'inventory',holder:inventoryHolder,asset,gamePath:gamePathValue});
   inventoryHolder=String(data.holder);
   parent.append(el('p','管理玩家随身物品、已记录的玩家船员背包，以及存档中有独立 inventory 节点的玩家飞船和空间站。按分类查看物品；“删除”会将该位置的数量设为 0，统一暂存后仍可在修改清单撤销。','muted'));
   const bar=el('div',undefined,'feature-toolbar');

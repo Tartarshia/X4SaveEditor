@@ -163,6 +163,7 @@ class Editor(ManagementFeatures, ExpansionFeatures):
         self.equipment_catalogue.cache_clear()
         self.ammo_catalogue.cache_clear()
         self.galaxy_sectors.cache_clear()
+        self.asset_summary.cache_clear()
         self.sector_objects.cache_clear()
         self.encyclopedia_records.cache_clear()
         self.game.library.cache_clear()
@@ -170,6 +171,8 @@ class Editor(ManagementFeatures, ExpansionFeatures):
         self.game.component.cache_clear()
         self.game.component_paths.cache_clear()
         self.game.map_positions.cache_clear()
+        self.game.map_connections.cache_clear()
+        self.game.encyclopedia_source.cache_clear()
         self.workforce_data.cache_clear()
 
     @lru_cache(maxsize=50000)
@@ -536,7 +539,12 @@ class Editor(ManagementFeatures, ExpansionFeatures):
 
     def inventory_data(self, request):
         locations = list(self.inventory_locations.values())
-        selected = int(request.get('holder') or self.player)
+        if request.get('asset'):
+            asset=int(request['asset'])
+            if asset not in self.assets:raise ValueError('请选择玩家资产')
+            locations=[r for r in locations if r.get('asset')==asset]
+        selected = int(request.get('holder') or (locations[0]['id'] if request.get('asset') and locations else self.player))
+        if request.get('asset') and selected not in {r['id'] for r in locations}:raise ValueError('物品位置不属于当前资产')
         if selected not in self.inventory_locations:
             raise ValueError('请选择已识别的玩家物品位置')
         inventory = self.inventory_locations[selected]['inventory']
@@ -658,6 +666,8 @@ class Editor(ManagementFeatures, ExpansionFeatures):
             if kind=='crew_roster':data['counts']={role['id']:sum(r['role']==role['id'] for r in rows) for role in data['roles']}
             return data
         if kind == 'map':return self.map_data(request)
+        if kind == 'assets':return self.asset_directory(request)
+        if kind == 'asset_detail':return self.asset_detail(request)
         if kind == 'encyclopedia':return self.encyclopedia_data(request)
         if kind == 'station_settings':return self.station_settings(request)
         if kind == 'research_tasks':return {'rows':self.research_tasks()}
@@ -679,6 +689,7 @@ class Editor(ManagementFeatures, ExpansionFeatures):
         if kind == 'station_money':
             rows = [{'id':n,'name':self.asset_name(n),'code':self.assets[n].get('code',''),
                      'sector':self.sector(n),**account} for n,account in self.station_accounts.items()]
+            if request.get('station'):rows=[r for r in rows if r['id']==int(request['station'])]
             if request.get('sector'):
                 rows = [r for r in rows if r['sector']['id'] == str(request['sector'])]
             rows = [r for r in rows if query in ' '.join((r['name'],r['code'],str(r['id']),r['sector']['name'])).lower()]

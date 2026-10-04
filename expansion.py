@@ -10,6 +10,38 @@ AMMO_GROUPS={'missiles':'missile','countermeasures':'countermeasure','deployable
 
 
 class ExpansionFeatures:
+    @staticmethod
+    def map_knowledge(attrs):
+        if attrs.get('owner')=='player':return {'known':True,'knowledge':'owned'}
+        if attrs.get('known')=='1' or 'player' in attrs.get('knownto','').split():return {'known':True,'knowledge':'saved'}
+        return {'known':False,'knowledge':'unknown'}
+    @lru_cache(maxsize=8192)
+    def asset_summary(self,node):
+        if node not in self.assets:raise ValueError('请选择玩家资产')
+        attrs=self.assets[node];ship=node in self.ships
+        return {'id':node,'kind':'ship' if ship else 'station','name':self.asset_name(node),
+                'code':attrs.get('code') or attrs.get('id') or str(node),'macro':attrs.get('macro',''),
+                'model':self.game.model_name(attrs.get('macro','')),
+                'type':self.game.ship_type(attrs.get('macro',''),attrs.get('class','')) if ship else '空间站',
+                'sector':self.sector(node)}
+
+    def asset_directory(self,request):
+        kind=request.get('assetKind','all');sector=str(request.get('sector') or '')
+        query=str(request.get('search','')).lower();page=whole(request.get('page',0),0,100000)
+        if kind not in ('all','ship','station'):raise ValueError('无效的资产分类')
+        rows=[self.asset_summary(n) for n in self.assets];sectors={r['sector']['id']:r['sector'] for r in rows}
+        rows=[r for r in rows if (kind=='all' or r['kind']==kind) and (not sector or r['sector']['id']==sector)
+              and query in ' '.join(str(r[k]) for k in ('name','code','model','macro','type','id')).lower()]
+        rows.sort(key=lambda r:(r['sector']['name'],r['kind'],r['name'],r['id']))
+        return {'rows':rows[page*100:(page+1)*100],'total':len(rows),'page':page,
+                'sectors':sorted(sectors.values(),key=lambda s:(s['id']=='unknown',s['name']))}
+
+    def asset_detail(self,request):
+        node=whole(request['id'],1,2**63-1);row=self.asset_summary(node)
+        return {**row,'crewCount':sum(r['asset']==node for r in self.crew.values()),
+                'inventoryLocations':[r for r in self.inventory_locations.values() if r.get('asset')==node],
+                'account':self.station_accounts.get(node), 'headquarters':node in self.headquarters()}
+
     def leaf(self,node):
         return not self.db.execute('SELECT 1 FROM nodes WHERE parent=? LIMIT 1',(node,)).fetchone()
 
@@ -155,7 +187,8 @@ class ExpansionFeatures:
                 n=self.node(n)[0]
             result.append({'id':node,'ref':attrs.get('id',''),'macro':attrs.get('macro',''),
                            'name':self.game.sectors.get(attrs.get('macro','').lower(),attrs.get('macro','')),
-                           'known':attrs.get('known')=='1','owner':attrs.get('owner',''),
+                           **self.map_knowledge(attrs),'owner':attrs.get('owner',''),
+                           'ownerName':self.game.name(attrs['owner']) if attrs.get('owner') else '归属未确认',
                            'source':self.game.sector_source(attrs.get('macro','')),
                            'x':x,'z':z,'positionKnown':hasPosition})
         return result
@@ -166,7 +199,13 @@ class ExpansionFeatures:
         discovered=self.first(self.player,'discovered')
         entries=[n for n in self.children(discovered,'sector') if sector and self.attrs(n).get('id')==sector['ref']]
         tree=self.first(entries[0],'quadtree') if len(entries)==1 else None
+        ids={s['macro'].lower():s['id'] for s in sectors};edges={}
+        for edge in self.game.map_connections():
+            start=ids.get(edge['from']);end=ids.get(edge['to'])
+            if start and end:edges.setdefault(tuple(sorted((start,end))),{'from':start,'to':end})
         return {'sectors':sectors,'selected':selected,'tree':tree,'revealAvailable':bool(tree),
+                'connections':list(edges.values()),
+                'assets':self.asset_directory({'sector':str(selected),'page':request.get('assetPage',0)}) if sector else {'rows':[],'total':0,'page':0,'sectors':[]},
                 'objects':self.sector_objects(selected,int(request.get('page',0))) if sector else {'rows':[],'total':0}}
 
     @lru_cache(maxsize=128)
@@ -179,7 +218,7 @@ class ExpansionFeatures:
             if attrs.get('class') not in ('station','gate','highwaygate'):continue
             if page*100<=total<(page+1)*100:
                 rows.append({'id':node,'name':attrs.get('name') or self.game.model_name(attrs.get('macro','')),
-                             'class':attrs.get('class'),'known':attrs.get('known')=='1'})
+                             'class':attrs.get('class'),**self.map_knowledge(attrs)})
             total+=1
         return {'rows':rows,'total':total,'page':page}
 
@@ -204,17 +243,21 @@ class ExpansionFeatures:
                 identity=wid
             if group and (group,identity) not in saved:
                 rows.append({'id':identity,'identity':identity,'group':group,'name':ware['name'],'known':False});saved.add((group,identity));groups.append(group)
+        for row in rows:row['source']=self.game.encyclopedia_source(row['identity'])
         return parent,groups,rows
 
     def encyclopedia_data(self,request):
         parent,groups,rows=self.encyclopedia_records()
+        sources={r['source']['id']:r['source'] for r in rows};source=request.get('source','')
         query=str(request.get('search','')).lower();group=request.get('group')
         status=request.get('status','all')
         if status not in ('all','unknown','known'):raise ValueError('无效的百科状态筛选')
-        rows=[r for r in rows if (not group or r['group']==group) and query in (r['name']+' '+r['identity']).lower()
+        rows=[r for r in rows if (not group or r['group']==group) and (not source or r['source']['id']==source)
+              and query in (r['name']+' '+r['identity']+' '+r['source']['name']+' '+r['source']['id']).lower()
               and (status=='all' or r['known']==(status=='known'))]
         rows.sort(key=lambda r:(r['group'],r['name'],str(r['id'])));page=max(0,int(request.get('page',0)))
-        return {'rows':rows[page*100:(page+1)*100],'total':len(rows),'page':page,'groups':sorted(set(groups)),'parent':parent}
+        return {'rows':rows[page*100:(page+1)*100],'total':len(rows),'page':page,'groups':sorted(set(groups)),
+                'sources':sorted(sources.values(),key=lambda r:(r['id']=='unknown',r['id']!='base',r['name'])),'parent':parent}
 
     def station_settings(self,request):
         station=int(request.get('station') or 0)

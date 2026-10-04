@@ -15,6 +15,7 @@ class GameData:
         self.layers = []
         self.layer_origins = []
         self.sector_sources = {}
+        self.catalogue_sources = {'ware':{},'faction':{}}
         self.source_names = {'base':'基础游戏','unknown':'来源未确认'}
         self.texts = {}
         self.wares = {}
@@ -120,6 +121,10 @@ class GameData:
                     for dataset in merged.findall('dataset'):
                         macro=dataset.get('macro','').lower()
                         if macro:self.sector_sources.setdefault(macro,origin)
+                elif tag in self.catalogue_sources and merged is not None:
+                    for item in merged.findall(tag):
+                        identity=item.get('id','').lower()
+                        if identity:self.catalogue_sources[tag].setdefault(identity,origin)
             if merged is None:
                 continue
             for item in merged.findall(tag):
@@ -242,6 +247,58 @@ class GameData:
     def sector_source(self,macro):
         origin=self.sector_sources.get(str(macro).lower(),'unknown')
         return {'id':origin,'name':self.translate(self.source_names.get(origin,origin))}
+
+    @lru_cache(maxsize=4096)
+    def encyclopedia_source(self,identity):
+        key=str(identity).lower();origin='unknown'
+        path=self.macro_paths.get(key)
+        if path:
+            # Inspect only this small resource. A later diff changes properties,
+            # but does not move the original definition to another expansion.
+            for layer,source in zip(self.layers,self.layer_origins):
+                if path not in layer:continue
+                root=self.read(layer[path])
+                if root.tag!='diff' and any(n.get('name','').lower()==key for n in root.iter('macro')):
+                    origin=source;break
+        else:
+            origin=self.catalogue_sources['ware'].get(key,
+                self.catalogue_sources['faction'].get(key,self.sector_sources.get(key,'unknown')))
+        return {'id':origin,'name':self.translate(self.source_names.get(origin,origin))}
+
+    @lru_cache(maxsize=1)
+    def map_connections(self):
+        galaxy=self.library('maps/xu_ep2_universe/galaxy.xml')
+        clusters=self.library('maps/xu_ep2_universe/clusters.xml')
+        if galaxy is None or clusters is None:return []
+        sectors={}
+        for cluster in clusters.findall('macro'):
+            sectors[cluster.get('name','').lower()]={c.get('name','').lower():c.find('macro').get('ref','').lower()
+                for c in cluster.findall('connections/connection') if c.find('macro') is not None and c.get('ref')=='sectors'}
+        result=[]
+        for universe in galaxy.findall('macro'):
+            refs={c.get('name','').lower():c.find('macro').get('ref','').lower()
+                for c in universe.findall('connections/connection') if c.find('macro') is not None and c.get('ref')=='clusters'}
+            def endpoint(path):
+                parts=[p.lower() for p in path.split('/') if p not in ('','..','.')]
+                if len(parts)<2:return None
+                return sectors.get(refs.get(parts[0]),{}).get(parts[1])
+            for c in universe.findall('connections/connection'):
+                target=c.find('macro')
+                if c.get('ref')!='destination' or target is None:continue
+                start=endpoint(c.get('path',''));end=endpoint(target.get('path',''))
+                if start and end and start!=end:result.append({'from':start,'to':end,'name':c.get('name','')})
+        # Accelerators between sectors of the same cluster are declared here.
+        for cluster in clusters.findall('macro'):
+            refs=sectors.get(cluster.get('name','').lower(),{})
+            def local_endpoint(path):
+                parts=[p.lower() for p in path.split('/') if p not in ('','..','.')]
+                return refs.get(parts[0]) if parts else None
+            for c in cluster.findall('connections/connection'):
+                target=c.find('macro')
+                if c.get('ref')!='destination' or target is None:continue
+                start=local_endpoint(c.get('path',''));end=local_endpoint(target.get('path',''))
+                if start and end and start!=end:result.append({'from':start,'to':end,'name':c.get('name','')})
+        return result
 
     @lru_cache(maxsize=1)
     def map_positions(self):

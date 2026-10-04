@@ -18,8 +18,8 @@ function dependencyPreview(rows,kind,storage){
   for(const id of removed)targets.delete(id);return targets;
 }
 
-async function renderShipMods(parent){
-  const bar=el('div',undefined,'feature-toolbar');shipPicker(bar);parent.append(bar);
+async function renderShipMods(parent,embedded=false){
+  if(!embedded){const bar=el('div',undefined,'feature-toolbar');shipPicker(bar);parent.append(bar);}
   if(!selectedShip){parent.append(el('p','请先按星区、船名或船型选择玩家飞船。','muted'));return;}
   const data=await job('gameplay',{kind:'ship_mods',ship:selectedShip,gamePath:gamePathValue});
   const ship=gameHome.ships.find(s=>String(s.id)===String(selectedShip));
