@@ -105,6 +105,37 @@ async function renderHeadquarters(parent){
   }
   filter.oninput=()=>{const q=filter.value.trim().toLowerCase();for(const tr of t.body.rows)tr.hidden=!tr.cells[0].textContent.toLowerCase().includes(q);};parent.append(t.wrap);
   await renderResearchTimers(parent);
+  await renderTerraforming(parent);
+}
+
+let terraformingPlanet='', terraformingSearch='', terraformingPage=0;
+async function renderTerraforming(parent){
+  const data=await job('gameplay',{kind:'terraforming',planet:terraformingPlanet,search:terraformingSearch,page:terraformingPage,gamePath:gamePathValue});
+  const box=section(parent,'行星改造','调整已有环境指标，或按项目的实际需求补齐总部库存。项目完成、任务奖励和行星外观仍由游戏处理；环境指标可能被事件或后续项目再次改变。');
+  if(!data.planet){box.append(el('p','存档里没有已有的行星改造记录。','muted'));return;}
+  terraformingPlanet=String(data.planet.id);
+  const toolbar=el('div',undefined,'feature-toolbar');const picker=el('select');picker.setAttribute('aria-label','改造行星');
+  for(const p of data.planets){const o=el('option',`${p.name} · ${p.macro}`);o.value=p.id;picker.append(o);}picker.value=terraformingPlanet;
+  picker.onchange=work(async()=>{terraformingPlanet=picker.value;terraformingPage=0;await renderFeature();});
+  toolbar.append(picker);box.append(toolbar,el('p',`剧情任务：${data.planet.missionCompleted?'存档已标记完成':'未标记完成'} · 当前项目：${data.planet.active||'无'} · ${data.hqHere?'总部位于此星系':'总部不在此星系，补齐资源不可用'}`,'muted'));
+  const stats=table(['指标 / ID','当前值 / 状态','目标值','游戏范围']);
+  for(const r of data.stats){const tr=el('tr');cell(tr,`${r.name}\n${r.key}`).className='named-cell';cell(tr,`${r.value??'无法读取'}${r.status?' · '+r.status:''}`);
+    const make=value=>({kind:'terraforming_stat',id:r.id,planet:data.planet.id,value,original:r.value,label:`${data.planet.name} / ${r.name}`});
+    const target=cell(tr,'');if(r.editable){const input=bindDraft(numberInput(currentValue(make(r.value)),r.min,r.max),make);input.step='any';input.setAttribute('aria-label',`${r.key} 改造指标`);target.append(input);}
+    else target.append(el('span','只读'));
+    target.append(xmlButton(make(r.value)));cell(tr,r.max===null?'目录没有明确上限':`${r.min}–${r.max}`);stats.body.append(tr);
+  }box.append(stats.wrap,el('p','人口、训练人数及无明确上限的指标只读；正在执行项目的行星指标也只读。未保存的默认指标不创建新记录。','muted'));
+  const search=el('input');search.placeholder='搜索改造项目名称 / ID / 类别';search.setAttribute('aria-label','筛选改造项目');search.value=terraformingSearch;
+  toolbar.append(search,button('筛选项目',async()=>{terraformingSearch=search.value.trim();terraformingPage=0;await renderFeature();}));
+  const projects=table(['项目 / ID','类别','状态','实际物资需求','操作']);
+  for(const r of data.rows){const tr=el('tr');cell(tr,`${r.name}\n${r.key}`).className='named-cell';cell(tr,r.group);cell(tr,r.active?'正在执行':r.completed===null?'状态未知':r.completed?`已完成 ${r.completed} 次`:'未完成');
+    cell(tr,r.resources.map(w=>`${w.name} [${w.id}] × ${w.amount===null?'未知':fmt(w.amount)}`).join('\n')||'无已保存的物资需求').className='named-cell';
+    const c={kind:'terraforming_stock',id:r.id,planet:data.planet.id,value:1,original:0,label:`总部补齐改造资源：${r.name}`,displayValue:'按需求补齐库存'};
+    const actions=cell(tr,'');if(r.canSupply)actions.append(draftAction('补齐总部资源',c),xmlButton(c));else actions.append(xmlButton({kind:'terraforming_project',id:r.id,planet:data.planet.id,label:`改造项目：${r.name}`}));projects.body.append(tr);
+  }box.append(projects.wrap);
+  const pages=el('div',undefined,'feature-toolbar');const prev=button('上一页',async()=>{terraformingPage--;await renderFeature();});prev.disabled=!data.page;
+  const next=button('下一页',async()=>{terraformingPage++;await renderFeature();});next.disabled=(data.page+1)*50>=data.total;
+  pages.append(prev,el('span',`${data.total} 项 · 第 ${data.page+1} 页`),next);box.append(pages);
 }
 
 async function renderLicences(parent){

@@ -10,6 +10,7 @@ from game_data import GameData, DEFAULT_GAME
 import shortcuts
 from management import ManagementFeatures, MOD_LABELS, whole
 from expansion import ExpansionFeatures
+from terraforming import TerraformingFeatures
 
 SKILLS = ('piloting', 'management', 'engineering', 'boarding', 'morale')
 DIPLOMACY_EXPERIENCE = {'negotiation':'$diplomacy_exp_negotiation','espionage':'$diplomacy_exp_espionage'}
@@ -40,7 +41,7 @@ def inventory_group(wid, ware):
     return 'other'
 
 
-class Editor(ManagementFeatures, ExpansionFeatures):
+class Editor(ManagementFeatures, ExpansionFeatures, TerraformingFeatures):
     def __init__(self, folder, game_path=None, progress=lambda m: None, catalog=None):
         self.folder = Path(folder)
         self.db = sqlite3.connect((self.folder / 'index.db').resolve().as_uri() + '?mode=ro', uri=True)
@@ -164,6 +165,8 @@ class Editor(ManagementFeatures, ExpansionFeatures):
         self.ammo_catalogue.cache_clear()
         self.galaxy_sectors.cache_clear()
         self.asset_summary.cache_clear()
+        self.terraforming_catalogue.cache_clear()
+        self.terraforming_planets.cache_clear()
         self.sector_objects.cache_clear()
         self.encyclopedia_records.cache_clear()
         self.game.library.cache_clear()
@@ -568,6 +571,8 @@ class Editor(ManagementFeatures, ExpansionFeatures):
     def source_nodes(self, command):
         """Locate immutable source records, including insertion parents and side effects."""
         kind = command.get('kind')
+        if kind in ('terraforming_stat','terraforming_stock','terraforming_project'):
+            return self.terraforming_sources(command)
         if kind in ('ammunition','repair','refit','crew_role','crew_count','map_known','map_reveal','encyclopedia','station_price','station_rule','station_restriction','station_allocation','research_stock','research_time'):
             return self.expansion_sources(command)
         identity = command.get('id')
@@ -671,6 +676,7 @@ class Editor(ManagementFeatures, ExpansionFeatures):
         if kind == 'encyclopedia':return self.encyclopedia_data(request)
         if kind == 'station_settings':return self.station_settings(request)
         if kind == 'research_tasks':return {'rows':self.research_tasks()}
+        if kind == 'terraforming':return self.terraforming_data(request)
         if kind == 'home':
             money = next((self.attrs(n).get('amount') for n in self.members.get('money',[]) if 'amount' in self.attrs(n)),None)
             if money is None:
@@ -773,7 +779,12 @@ class Editor(ManagementFeatures, ExpansionFeatures):
         missing_relations = {}
         for c in unique.values():
             kind = c.get('kind')
-            if kind in ('ammunition','repair','refit','crew_role','crew_count','map_known','map_reveal','encyclopedia','station_price','station_rule','station_restriction','station_allocation','research_stock','research_time'):
+            if kind == 'terraforming_stat':
+                self.plan_terraforming_stat(plan,c)
+            elif kind == 'terraforming_stock':
+                self.terraforming_supply(c)
+                expansion_changes.append(c)
+            elif kind in ('ammunition','repair','refit','crew_role','crew_count','map_known','map_reveal','encyclopedia','station_price','station_rule','station_restriction','station_allocation','research_stock','research_time'):
                 expansion_changes.append(c)
             elif kind in ('mod_value','mod_config','research','licence','workforce'):
                 management_changes.append(c)
@@ -968,17 +979,23 @@ class Editor(ManagementFeatures, ExpansionFeatures):
             if additions:
                 xml = ''.join(additions)
                 plan.add(data['cargo'] or storage,xml if data['cargo'] else element('cargo',children=xml))
+        manual_stock={key:dict(updates) for key,updates in stock_changes.items()}
         for command in expansion_changes:
-            if command['kind']!='research_stock':continue
-            spec=self.game.research.get(str(command['id']));hqs=self.headquarters()
-            if not spec or spec['hidden'] or len(hqs)!=1:raise ValueError('未找到科研或唯一总部')
+            if command['kind'] not in ('research_stock','terraforming_stock'):continue
+            hqs=self.headquarters()
+            if command['kind']=='terraforming_stock':
+                resources=self.terraforming_supply(command)
+            else:
+                spec=self.game.research.get(str(command['id']))
+                if not spec or spec['hidden'] or len(hqs)!=1:raise ValueError('未找到科研或唯一总部')
+                resources=spec.get('resources',{})
             station=hqs[0];data=self.station_resources({'station':station})
             current={r['id']:r['amount'] for r in data['ordinaryWares']}
             updates=stock_changes.setdefault((station,False),{})
-            for wid,amount in spec.get('resources',{}).items():
-                if wid in updates and updates[wid]<amount:raise ValueError('总部库存草稿与科研所需物资冲突')
+            for wid,amount in resources.items():
+                if wid in manual_stock.get((station,False),{}) and manual_stock[(station,False)][wid]<amount:raise ValueError('总部库存草稿与所需物资冲突')
                 updates[wid]=max(amount,current.get(wid,0),updates.get(wid,0))
-        expansion_changes=[c for c in expansion_changes if c['kind']!='research_stock']
+        expansion_changes=[c for c in expansion_changes if c['kind'] not in ('research_stock','terraforming_stock')]
         for (station,build),updates in stock_changes.items():
             self.plan_station_stock(plan,station,build,updates)
         for holder, updates in inventory_changes.items():
